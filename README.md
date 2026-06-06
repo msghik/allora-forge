@@ -1,11 +1,30 @@
 # Allora Forge — Topic 69 Worker (24h BTC/USD)
 
-Phase 3 of a BTC/USD price-prediction pipeline for **Allora Topic 69** (open
-1-day forecast on 1-hour candles). This stage builds the target, trains and
-validates a model, and exports the single artifact the **Model Forge** scores:
-a self-contained `predict.pkl`.
+A BTC/USD price-prediction worker for **Allora Topic 69** (open 1-day forecast on
+1-hour candles). It comes in two layers:
 
-## Quick start
+1. **One-shot pipeline** (`phase3_train_export.py`) — train/validate/export a
+   single `predict.pkl`. Great for the notebook workflow and a first Forge entry.
+2. **Self-updating MLOps system** (`forge/` + Docker) — retrains **every day** on
+   fresh data, gates each new model against the current one (auto-rollback),
+   versions everything, and serves inferences to an Allora worker node. See
+   **[docs/MLOPS.md](docs/MLOPS.md)**.
+
+## Production: self-updating worker (full stack)
+
+```bash
+cp .env.example .env            # optional config
+docker compose up -d --build    # trainer (daily retrain) + inference (:8000)
+curl localhost:8000/health
+curl localhost:8000/inference/BTC
+```
+Trains on first boot, then daily. The promoted artifact lands at
+`models/current/predict.pkl` (upload to the Forge) and the inference server is
+ready for [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node)
+(see `allora/config.example.json`). Local equivalents: `make train`, `make serve`,
+`make test`.
+
+## Quick start (one-shot pipeline)
 
 ```bash
 pip install -r requirements.txt

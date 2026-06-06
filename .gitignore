@@ -4,9 +4,15 @@ predict.pkl
 # Cached / fetched market data
 *.csv
 
+# MLOps runtime state (data store + versioned model registry)
+data/
+models/
+.env
+
 # Python
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+.pytest_cache/
 .venv/
 venv/
