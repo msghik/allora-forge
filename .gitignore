@@ -1,0 +1,12 @@
+# Reproducible artifact — regenerate with `python phase3_train_export.py`
+predict.pkl
+
+# Cached / fetched market data
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
