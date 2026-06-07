@@ -1,11 +1,13 @@
-# Allora Forge — Topic 69 worker pipeline.
-# Technical indicators (RSI, Bollinger) are implemented in pure pandas/numpy,
-# so there is NO pandas_ta dependency — predict.pkl stays portable to the Forge
-# scoring environment (it only needs numpy/pandas + the model library).
-ccxt>=4.0           # only used by fetch_data() to download candles
+# Allora Forge — Topic 69 worker (runtime).
+# Technical indicators (RSI, Bollinger) are pure pandas/numpy — no pandas_ta —
+# so predict.pkl stays portable to the Forge scoring environment.
+ccxt>=4.0           # exchange data ingestion
 numpy>=1.23
 pandas>=1.5
 scikit-learn>=1.1
 lightgbm>=3.3
 cloudpickle>=2.2
 scipy>=1.9
+fastapi>=0.110      # inference server
+uvicorn[standard]>=0.27
+requests>=2.28      # optional alert webhook

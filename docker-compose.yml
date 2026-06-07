@@ -1,0 +1,35 @@
+# Full worker stack: a scheduled trainer + an always-on inference server,
+# sharing the data store and model registry through volumes.
+services:
+  trainer:
+    build:
+      context: .
+    image: allora-forge:latest
+    command: ["python", "-m", "forge.pipeline", "--loop"]
+    environment:
+      - ALLORA_DATA_DIR=/data
+      - ALLORA_MODELS_DIR=/models
+      - ALLORA_SYMBOL=${ALLORA_SYMBOL:-BTC/USDT}
+      - ALLORA_RETRAIN_HOUR_UTC=${ALLORA_RETRAIN_HOUR_UTC:-1}
+      - ALLORA_ALERT_WEBHOOK=${ALLORA_ALERT_WEBHOOK:-}
+    volumes:
+      - ./data:/data
+      - ./models:/models
+    restart: unless-stopped
+
+  inference:
+    image: allora-forge:latest
+    command: ["uvicorn", "forge.server:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - ALLORA_DATA_DIR=/data
+      - ALLORA_MODELS_DIR=/models
+      - ALLORA_SYMBOL=${ALLORA_SYMBOL:-BTC/USDT}
+      - ALLORA_TOPIC_TOKEN=${ALLORA_TOPIC_TOKEN:-BTC}
+    volumes:
+      - ./data:/data
+      - ./models:/models
+    ports:
+      - "8000:8000"
+    depends_on:
+      - trainer
+    restart: unless-stopped
