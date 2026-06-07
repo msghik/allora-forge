@@ -1,5 +1,5 @@
 {
-  "_comment": "Example allora-offchain-node config for Topic 69 (BTC 24h). Point the worker's InferenceEndpoint at this repo's inference server. Match the exact schema to your allora-offchain-node version: https://github.com/allora-network/allora-offchain-node",
+  "_comment": "Example allora-offchain-node config for the 1h BTC/USD log-return competition topic. Replace REPLACE_WITH_BTC_1H_TOPIC_ID with the topic id shown on the competition page, point InferenceEndpoint at this repo's inference server, and match the exact schema to your allora-offchain-node version: https://github.com/allora-network/allora-offchain-node",
   "wallet": {
     "addressKeyName": "REPLACE_WITH_YOUR_KEY_NAME",
     "addressRestoreMnemonic": "REPLACE_WITH_YOUR_MNEMONIC",
@@ -10,7 +10,7 @@
   },
   "worker": [
     {
-      "topicId": 69,
+      "topicId": "REPLACE_WITH_BTC_1H_TOPIC_ID",
       "inferenceEntrypointName": "api-worker-reputer",
       "loopSeconds": 60,
       "parameters": {

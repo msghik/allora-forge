@@ -16,8 +16,11 @@ from . import features
 from .features import add_features
 
 
-def make_predict(model, feature_cols):
-    """Build the single callable the Forge / worker node expects."""
+def make_predict(model, feature_cols, scale: float = 1.0):
+    """Build the single callable the Forge / worker node expects.
+
+    ``scale`` is the variance-calibration factor applied to the raw model output
+    so predictions have realistic magnitude (log-aspect-ratio criterion)."""
 
     def predict(df):
         import pandas as pd  # noqa: F401 -- self-sufficient at inference time
@@ -34,18 +37,18 @@ def make_predict(model, feature_cols):
         if len(feats) == 0:
             raise ValueError("Not enough candle history to compute features "
                              "(need ~50+ candles).")
-        return float(model.predict(feats[feature_cols].iloc[[-1]])[0])
+        return float(model.predict(feats[feature_cols].iloc[[-1]])[0] * scale)
 
     return predict
 
 
-def export_predict(model, feature_cols, out_path: str) -> str:
+def export_predict(model, feature_cols, out_path: str, scale: float = 1.0) -> str:
     """Cloudpickle the predict callable to ``out_path`` (feature code by value)."""
     import cloudpickle
 
     cloudpickle.register_pickle_by_value(features)
     try:
-        predict = make_predict(model, feature_cols)
+        predict = make_predict(model, feature_cols, scale=scale)
         with open(out_path, "wb") as f:
             cloudpickle.dump(predict, f)
     finally:

@@ -89,21 +89,20 @@ def rollback(config, to_version: str | None = None) -> str | None:
 def gate(new_metrics: dict, current_metrics: dict | None, config) -> tuple[bool, str]:
     """Decide whether to promote the new candidate.
 
-    A candidate must (a) show a real edge -- positive Pearson r AND directional
-    accuracy >= baseline_min_da -- and (b) be at least as good as the current
-    production model on Pearson r within ``gate_tolerance``.
+    Sanity floor: positive Pearson r (a real, non-anti-predictive signal).
+    Ranking/no-regression: the competition loss surrogate ``zptae_impr`` (higher
+    is better) must be at least the current model's within ``gate_tolerance``.
     """
-    r = new_metrics["pearson_r"]
-    da = new_metrics["directional_acc"]
-    if not (r > 0 and da >= config.baseline_min_da):
-        return False, (f"failed baseline: r={r:.4f} (need >0), "
-                       f"da={da:.3f} (need >={config.baseline_min_da})")
+    r = new_metrics.get("pearson_r", 0.0)
+    if not (r > 0):
+        return False, f"failed baseline: pearson_r={r:.4f} (need > 0)"
+    primary_new = new_metrics.get("zptae_impr", float("-inf"))
     if current_metrics is None:
         return True, "no current model; promoting first candidate"
-    cur_r = current_metrics.get("pearson_r", float("-inf"))
-    if r >= cur_r - config.gate_tolerance:
-        return True, f"r {r:.4f} >= current {cur_r:.4f} - tol {config.gate_tolerance}"
-    return False, f"regression: r {r:.4f} < current {cur_r:.4f} - tol {config.gate_tolerance}"
+    primary_cur = current_metrics.get("zptae_impr", float("-inf"))
+    if primary_new >= primary_cur - config.gate_tolerance:
+        return True, f"zptae_impr {primary_new:.4f} >= current {primary_cur:.4f} - tol {config.gate_tolerance}"
+    return False, f"regression: zptae_impr {primary_new:.4f} < current {primary_cur:.4f} - tol {config.gate_tolerance}"
 
 
 def append_metrics(config, record: dict) -> None:

@@ -1,17 +1,26 @@
 # Full worker stack: a scheduled trainer + an always-on inference server,
 # sharing the data store and model registry through volumes.
+# All ALLORA_* knobs fall through from your shell / .env (with defaults here).
+x-env: &env
+  ALLORA_DATA_DIR: /data
+  ALLORA_MODELS_DIR: /models
+  ALLORA_EXCHANGE: ${ALLORA_EXCHANGE:-binanceus}
+  ALLORA_SYMBOL: ${ALLORA_SYMBOL:-BTC/USDT}
+  ALLORA_TIMEFRAME: ${ALLORA_TIMEFRAME:-5m}
+  ALLORA_HORIZON_STEPS: ${ALLORA_HORIZON_STEPS:-12}
+  ALLORA_TRAIN_WINDOW_DAYS: ${ALLORA_TRAIN_WINDOW_DAYS:-120}
+  ALLORA_CALIBRATION_RATIO: ${ALLORA_CALIBRATION_RATIO:-1.0}
+  ALLORA_TOPIC_TOKEN: ${ALLORA_TOPIC_TOKEN:-BTC}
+  ALLORA_RETRAIN_HOUR_UTC: ${ALLORA_RETRAIN_HOUR_UTC:-1}
+  ALLORA_ALERT_WEBHOOK: ${ALLORA_ALERT_WEBHOOK:-}
+
 services:
   trainer:
     build:
       context: .
     image: allora-forge:latest
     command: ["python", "-m", "forge.pipeline", "--loop"]
-    environment:
-      - ALLORA_DATA_DIR=/data
-      - ALLORA_MODELS_DIR=/models
-      - ALLORA_SYMBOL=${ALLORA_SYMBOL:-BTC/USDT}
-      - ALLORA_RETRAIN_HOUR_UTC=${ALLORA_RETRAIN_HOUR_UTC:-1}
-      - ALLORA_ALERT_WEBHOOK=${ALLORA_ALERT_WEBHOOK:-}
+    environment: *env
     volumes:
       - ./data:/data
       - ./models:/models
@@ -20,11 +29,7 @@ services:
   inference:
     image: allora-forge:latest
     command: ["uvicorn", "forge.server:app", "--host", "0.0.0.0", "--port", "8000"]
-    environment:
-      - ALLORA_DATA_DIR=/data
-      - ALLORA_MODELS_DIR=/models
-      - ALLORA_SYMBOL=${ALLORA_SYMBOL:-BTC/USDT}
-      - ALLORA_TOPIC_TOKEN=${ALLORA_TOPIC_TOKEN:-BTC}
+    environment: *env
     volumes:
       - ./data:/data
       - ./models:/models

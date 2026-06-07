@@ -42,7 +42,8 @@ def log_prediction(config, value: float, ref_close: float, model_version: str) -
     now = datetime.now(timezone.utc)
     append_jsonl(config.predictions_path, {
         "ts": now.isoformat(),
-        "mature_at": (now + timedelta(hours=config.horizon_hours)).isoformat(),
+        "mature_at": (now + timedelta(minutes=config.horizon_minutes)).isoformat(),
+        "symbol": config.symbol,
         "predicted_log_return": float(value),
         "ref_close": float(ref_close),
         "model_version": model_version,

@@ -76,3 +76,17 @@ def fit_final(name: str, params: dict, X, y, config):
         model = make_lgbm(config, n_estimators=params["n_estimators"])
     model.fit(X, y)
     return model
+
+
+def calibration_scale(y_true, y_pred, target_ratio: float) -> float:
+    """Factor s such that std(s * y_pred) ~= target_ratio * std(y_true).
+
+    Counters model shrinkage so predictions have realistic magnitude (the
+    log-aspect-ratio whitelist criterion). Pearson r and directional accuracy are
+    invariant to this positive scaling; WRMSE/ZPTAE and log-aspect are not.
+    """
+    sp = float(np.std(np.asarray(y_pred, dtype=float)))
+    st = float(np.std(np.asarray(y_true, dtype=float)))
+    if sp <= 0 or st <= 0:
+        return 1.0
+    return float(target_ratio * st / sp)

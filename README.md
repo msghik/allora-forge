@@ -1,30 +1,34 @@
-# Allora Forge — Topic 69 Worker (24h BTC/USD)
+# Allora Forge — BTC/USD log-return worker
 
-A BTC/USD price-prediction worker for **Allora Topic 69** (open 1-day forecast on
-1-hour candles). It comes in two layers:
+A BTC/USD log-return prediction worker for the **Allora Model Forge**. It comes
+in two layers:
 
-1. **One-shot pipeline** (`phase3_train_export.py`) — train/validate/export a
-   single `predict.pkl`. Great for the notebook workflow and a first Forge entry.
-2. **Self-updating MLOps system** (`forge/` + Docker) — retrains **every day** on
-   fresh data, gates each new model against the current one (auto-rollback),
-   versions everything, and serves inferences to an Allora worker node. See
-   **[docs/MLOPS.md](docs/MLOPS.md)**.
+1. **Self-updating MLOps system** (`forge/` + Docker) — the production worker for
+   the **1-hour BTC/USD log-return competition** (5-minute cadence). Retrains
+   **every day** on fresh 5-minute data, scores itself with the competition's own
+   metrics (ZPTAE + the whitelist bundle), variance-calibrates and gates each new
+   model against the current one (auto-rollback), versions everything, and serves
+   inferences to an Allora worker node. See **[docs/MLOPS.md](docs/MLOPS.md)**.
+2. **One-shot pipeline** (`phase3_train_export.py`) — a standalone notebook-style
+   script that trains/validates/exports a single `predict.pkl` for the 24h topic.
+   Kept as a reference example.
 
-## Production: self-updating worker (full stack)
+## Production: self-updating competition worker (full stack)
 
 ```bash
-cp .env.example .env            # optional config
+cp .env.example .env            # asset / exchange / calibration knobs
 docker compose up -d --build    # trainer (daily retrain) + inference (:8000)
 curl localhost:8000/health
 curl localhost:8000/inference/BTC
 ```
-Trains on first boot, then daily. The promoted artifact lands at
-`models/current/predict.pkl` (upload to the Forge) and the inference server is
-ready for [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node)
+Models on 5-minute candles with a 1-hour (12-bar) horizon; trains on first boot,
+then daily. The promoted artifact lands at `models/current/predict.pkl` (upload to
+the Forge) and the inference server is ready for
+[`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node)
 (see `allora/config.example.json`). Local equivalents: `make train`, `make serve`,
-`make test`.
+`make test`. For ETH, run a second stack with `ALLORA_SYMBOL=ETH/USDT`.
 
-## Quick start (one-shot pipeline)
+## Reference: one-shot 24h pipeline
 
 ```bash
 pip install -r requirements.txt
