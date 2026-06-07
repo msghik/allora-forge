@@ -20,7 +20,7 @@ class Config:
     horizon_steps: int = 12           # bars ahead = 1 hour at 5m (12 * 5m)
 
     # --- training ---
-    train_window_days: int = 120      # rolling window of 5m bars (~34.5k rows)
+    train_window_days: int = 180      # rolling window of 5m bars (~52k rows)
     val_fraction: float = 0.2         # chronological holdout
     min_train_rows: int = 2000
     random_state: int = 42
@@ -32,10 +32,11 @@ class Config:
     ))
 
     # --- variance calibration (fixes the log-aspect-ratio criterion) ---
-    # Scale predictions so std(pred) ~= ratio * std(true). 1.0 = full match
-    # (log-aspect ~0, most "informative"); lower (toward ~0.35) trades log-aspect
-    # margin for better WRMSE/WZPTAE-vs-zero. Must keep |log10(ratio)| < 0.5.
-    calibration_target_ratio: float = 1.0
+    # Each cycle searches this grid of std(pred)/std(true) ratios and keeps the
+    # one that passes the most whitelist criteria. Keep entries with
+    # |log10(ratio)| < 0.5 so the log-aspect-ratio criterion stays satisfiable.
+    calibration_ratio_grid: tuple = (0.4, 0.55, 0.7, 0.85, 1.0, 1.2)
+    calibration_target_ratio: float = 1.0   # fallback if the grid is overridden to one value
 
     # --- scoring (competition) ---
     zptae_power: float = 1.5          # power-tanh exponent (surrogate of Allora ZPTAE)
@@ -44,7 +45,7 @@ class Config:
 
     # --- data fetching ---
     fetch_page_limit: int = 1000
-    recent_candles: int = 300         # candles pulled for a single live inference (~25h at 5m)
+    recent_candles: int = 500         # candles pulled for a single live inference (~40h at 5m)
 
     # --- paths ---
     data_dir: str = "data"
@@ -116,8 +117,10 @@ class Config:
         c.timeframe = os.environ.get("ALLORA_TIMEFRAME", c.timeframe)
         c.horizon_steps = int(os.environ.get("ALLORA_HORIZON_STEPS", c.horizon_steps))
         c.train_window_days = int(os.environ.get("ALLORA_TRAIN_WINDOW_DAYS", c.train_window_days))
-        c.calibration_target_ratio = float(
-            os.environ.get("ALLORA_CALIBRATION_RATIO", c.calibration_target_ratio))
+        if "ALLORA_CALIBRATION_RATIO" in os.environ:  # fix the ratio (disable search)
+            r = float(os.environ["ALLORA_CALIBRATION_RATIO"])
+            c.calibration_target_ratio = r
+            c.calibration_ratio_grid = (r,)
         c.data_dir = os.environ.get("ALLORA_DATA_DIR", c.data_dir)
         c.models_dir = os.environ.get("ALLORA_MODELS_DIR", c.models_dir)
         c.retrain_hour_utc = int(os.environ.get("ALLORA_RETRAIN_HOUR_UTC", c.retrain_hour_utc))

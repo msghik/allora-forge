@@ -90,19 +90,25 @@ def gate(new_metrics: dict, current_metrics: dict | None, config) -> tuple[bool,
     """Decide whether to promote the new candidate.
 
     Sanity floor: positive Pearson r (a real, non-anti-predictive signal).
-    Ranking/no-regression: the competition loss surrogate ``zptae_impr`` (higher
-    is better) must be at least the current model's within ``gate_tolerance``.
+    Primary: number of whitelist criteria passed (more is better). Tiebreak /
+    no-regression: the ZPTAE-improvement surrogate within ``gate_tolerance``.
     """
     r = new_metrics.get("pearson_r", 0.0)
     if not (r > 0):
         return False, f"failed baseline: pearson_r={r:.4f} (need > 0)"
-    primary_new = new_metrics.get("zptae_impr", float("-inf"))
     if current_metrics is None:
         return True, "no current model; promoting first candidate"
-    primary_cur = current_metrics.get("zptae_impr", float("-inf"))
-    if primary_new >= primary_cur - config.gate_tolerance:
-        return True, f"zptae_impr {primary_new:.4f} >= current {primary_cur:.4f} - tol {config.gate_tolerance}"
-    return False, f"regression: zptae_impr {primary_new:.4f} < current {primary_cur:.4f} - tol {config.gate_tolerance}"
+    new_wl = new_metrics.get("whitelist_passed", 0)
+    cur_wl = current_metrics.get("whitelist_passed", 0)
+    if new_wl > cur_wl:
+        return True, f"whitelist {new_wl} > current {cur_wl}"
+    if new_wl < cur_wl:
+        return False, f"regression: whitelist {new_wl} < current {cur_wl}"
+    new_z = new_metrics.get("zptae_impr", float("-inf"))
+    cur_z = current_metrics.get("zptae_impr", float("-inf"))
+    if new_z >= cur_z - config.gate_tolerance:
+        return True, f"whitelist {new_wl}=={cur_wl}, zptae_impr {new_z:.4f} >= {cur_z:.4f}-tol"
+    return False, f"whitelist tie, zptae_impr {new_z:.4f} < {cur_z:.4f}-tol"
 
 
 def append_metrics(config, record: dict) -> None:

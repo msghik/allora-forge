@@ -13,7 +13,7 @@ competition's own metrics, and serves inferences to an Allora worker node.
 
 ### Two non-obvious consequences (baked into the design)
 1. **No shrink-to-zero.** A heavily-regularized model with small predictions minimizes raw error but **fails the log-aspect-ratio** criterion (`std_pred ≪ std_true`). We add a **variance-calibration** step so `std(pred) ≈ std(true)`.
-2. **A real tension** exists: WRMSE/WZPTAE-vs-zero reward shrinkage; log-aspect forbids it. That's why "a clear majority" — not all — is the bar. The `calibration_target_ratio` knob lets you sit anywhere on that trade-off (1.0 = max log-aspect compliance/contribution; ~0.35 = chase error-improvement at the edge of the ±0.5 bound).
+2. **A real tension** exists: WRMSE/WZPTAE-vs-zero reward shrinkage; log-aspect forbids it. That's why "a clear majority" — not all — is the bar. Each cycle **searches a calibration grid** (`calibration_ratio_grid`) and keeps the ratio that passes the **most** whitelist criteria, so the trade-off is resolved automatically against the scoreboard. Set `ALLORA_CALIBRATION_RATIO` to pin one ratio and disable the search.
 
 ## Architecture
 
@@ -52,14 +52,14 @@ competition's own metrics, and serves inferences to an Allora worker node.
 ## Components (`forge/`)
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Typed `Config`: `timeframe=5m`, `horizon_steps=12`, rolling window, calibration ratio, model grid, paths; env overrides. |
+| `config.py` | Typed `Config`: `timeframe=5m`, `horizon_steps=12`, rolling window, calibration grid, model params, paths; env overrides. |
 | `data.py` | Incremental 5m OHLCV ingest, dedup/gap checks, per-symbol CSV store, recent-candle fetch (store fallback). |
-| `features.py` | Canonical pure-pandas `add_features` + `FEATURE_COLS` (single source of truth). |
+| `features.py` | Canonical pure-pandas `add_features` + `FEATURE_COLS` — ~37 scale-free features: multi-scale momentum & volatility (incl. Parkinson, vol-regime), trend/MA distance, MACD, ADX, RSI/Stoch/Williams/CCI/MFI, Bollinger, volume z-score, order-flow imbalance, candle-shape microstructure, cyclical time. |
 | `train.py` | 1h target, chronological split, regularized Ridge (TS-CV α) + LightGBM (early stopping), **variance-calibration** factor. |
 | `evaluate.py` | Competition metrics (ZPTAE surrogate, WRMSE, DA + Wilson CI + binomial p, Pearson + p, log-aspect) on non-overlapping windows + whitelist pass/fail. |
-| `registry.py` | Versioned store, **promotion gate** (zptae-improvement, Pearson floor, no-regression), rollback, metrics log. |
+| `registry.py` | Versioned store, **promotion gate** (whitelist-criteria-passed → ZPTAE tiebreak, Pearson floor, no-regression), rollback, metrics log. |
 | `export.py` | `predict()` closure with calibration `scale` + cloudpickle (features by value → portable predict.pkl). |
-| `pipeline.py` | Orchestrates a cycle (`--once`) and the daily loop (`--loop`). |
+| `pipeline.py` | Cycle (`--once`) / daily loop (`--loop`): per-candidate **calibration-ratio search** + **whitelist-aware** winner selection. |
 | `server.py` | FastAPI worker: `/inference/{token}`, `/health`, `/metadata`; hot-reloads on promotion. |
 | `monitor.py` | Live-prediction logging, reconciliation vs realized 1h returns, alerts. |
 
@@ -85,15 +85,24 @@ First boot trains immediately (cold-start fetch of ~120 days of 5m candles), the
 - **Live skill:** after 1h, predictions mature →
   `python -c "from forge.config import Config; from forge import monitor; print(monitor.live_scoreboard(Config.from_env()))"`.
 - **Rollback:** `registry.rollback(Config.from_env())`.
-- **Tune the trade-off:** raise/lower `ALLORA_CALIBRATION_RATIO` to move between log-aspect compliance and error-improvement.
+- **Calibration:** searched automatically each cycle; set `ALLORA_CALIBRATION_RATIO` to pin one ratio and disable the search.
 - **Alerts:** set `ALLORA_ALERT_WEBHOOK` for training failures / rejected (regressing) candidates.
 
 ## Improving DA (the real alpha)
-Clearing `DA > 0.55` on 1h crypto is hard and is where modeling effort pays off:
-add microstructure/order-flow features, cross-asset BTC↔ETH signals, volatility-regime
-features, and consider training directly against a ZPTAE-style objective. The
-framework already measures all of this per cycle, so you can iterate against the
-exact scoreboard.
+The model already uses ~37 scale-free single-asset features (multi-scale momentum
+& volatility, trend, oscillators, volume/order-flow, candle-shape microstructure,
+regime, cyclical time), a per-cycle calibration search, and whitelist-aware
+selection. Clearing `DA > 0.55` on 1h crypto is still hard — remaining levers,
+roughly by expected impact:
+- **Cross-asset BTC↔ETH** lead-lag (needs the server to fetch both assets and pass
+  combined inputs — breaks the single-DataFrame `predict` contract, so it lives in
+  the serving layer rather than the portable predict.pkl).
+- **Alt-data**: order-book imbalance/depth, funding/open-interest, on-chain (gas,
+  active addresses) — the data sources the rules suggest.
+- **ZPTAE-direct training** (custom objective) and **model ensembling**.
+
+The framework scores all 8 criteria per cycle, so iterate against the exact
+scoreboard (`models/metrics.jsonl`).
 
 ## Local (no Docker)
 ```bash

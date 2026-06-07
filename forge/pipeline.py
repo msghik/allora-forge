@@ -47,32 +47,43 @@ def run_once(config: Config, fetcher=None) -> dict:
     ridge, ridge_p = train.train_ridge(X_tr, y_tr, config)
     lgbm, lgbm_p = train.train_lgbm(X_tr, y_tr, config)
 
-    # 4. Variance-calibrate each candidate and score on non-overlapping 1h windows.
+    # 4. For each candidate, search the calibration grid for the ratio that passes
+    #    the most whitelist criteria; score on non-overlapping 1h windows.
     step = config.horizon_steps if config.eval_nonoverlap else 1
     cands = {}
     for name, model, params in (("Ridge", ridge, ridge_p), ("LightGBM", lgbm, lgbm_p)):
-        scale = train.calibration_scale(y_tr, model.predict(X_tr), config.calibration_target_ratio)
-        val_pred = model.predict(X_val) * scale
-        m = evaluate.competition_metrics(y_val.values, val_pred, step=step, power=config.zptae_power)
-        cands[name] = {"metrics": m, "params": params, "scale": scale}
-        log.info("candidate %-8s | %s", name, _fmt(m))
+        raw_tr, raw_val = model.predict(X_tr), model.predict(X_val)
+        best = None
+        for ratio in config.calibration_ratio_grid:
+            scale = train.calibration_scale(y_tr.values, raw_tr, ratio)
+            m = evaluate.competition_metrics(y_val.values, raw_val * scale,
+                                             step=step, power=config.zptae_power)
+            m["whitelist_passed"] = evaluate.whitelist_report(m)["passed"]
+            key = (m["whitelist_passed"], m["directional_acc"], m["zptae_impr"])
+            if best is None or key > best["key"]:
+                best = {"key": key, "ratio": ratio, "metrics": m}
+        cands[name] = {"metrics": best["metrics"], "params": params, "ratio": best["ratio"]}
+        log.info("candidate %-8s ratio=%.2f | %s wl=%d/%d", name, best["ratio"],
+                 _fmt(best["metrics"]), best["metrics"]["whitelist_passed"], len(evaluate.WHITELIST))
 
-    # Winner by the competition loss surrogate (zptae improvement), DA as tiebreak.
-    win_name = max(cands, key=lambda k: (cands[k]["metrics"]["zptae_impr"],
-                                         cands[k]["metrics"]["directional_acc"]))
+    # Winner by whitelist criteria passed, then DA, then Pearson r.
+    win_name = max(cands, key=lambda k: (cands[k]["metrics"]["whitelist_passed"],
+                                         cands[k]["metrics"]["directional_acc"],
+                                         cands[k]["metrics"]["pearson_r"]))
     win = cands[win_name]
 
-    # 5. Refit winner on all (windowed) data; recompute calibration; export.
+    # 5. Refit winner on all (windowed) data; recalibrate at its ratio; export.
     version = registry.new_version_id()
     vdir = config.version_dir(version)
     os.makedirs(vdir, exist_ok=True)
     final_model = train.fit_final(win_name, win["params"], X, y, config)
-    scale = train.calibration_scale(y, final_model.predict(X), config.calibration_target_ratio)
+    scale = train.calibration_scale(y.values, final_model.predict(X), win["ratio"])
     export.export_predict(final_model, list(X.columns),
                           os.path.join(vdir, "predict.pkl"), scale=scale)
 
     wl = evaluate.whitelist_report(win["metrics"])
-    log.info("winner=%s scale=%.3f whitelist=%d/%d", win_name, scale, wl["passed"], wl["total"])
+    log.info("winner=%s ratio=%.2f scale=%.3f whitelist=%d/%d",
+             win_name, win["ratio"], scale, wl["passed"], wl["total"])
 
     metadata = {
         "version": version,
@@ -80,8 +91,9 @@ def run_once(config: Config, fetcher=None) -> dict:
         "git_sha": registry.git_sha(),
         "model": win_name,
         "params": win["params"],
+        "calibration_ratio": win["ratio"],
         "scale": scale,
-        "metrics": win["metrics"],          # the metrics the gate compares on
+        "metrics": win["metrics"],          # the metrics the gate compares on (incl. whitelist_passed)
         "whitelist": wl,
         "candidates": {k: v["metrics"] for k, v in cands.items()},
         "data_range": [str(df.index.min()), str(df.index.max())],

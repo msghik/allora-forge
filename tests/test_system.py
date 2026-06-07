@@ -54,14 +54,30 @@ def test_competition_metrics_keys():
     assert wl["total"] == len(evaluate.WHITELIST)
 
 
+def test_features_complete():
+    from forge.features import FEATURE_COLS, add_features
+    feats = add_features(_synth(3000))
+    assert len(feats) > 0
+    for col in FEATURE_COLS:
+        assert col in feats.columns
+    assert not feats[FEATURE_COLS].iloc[-1].isna().any()  # no NaN in the inference row
+
+
 def test_gate_logic():
     cfg = Config.from_env()
-    assert registry.gate({"pearson_r": 0.05, "zptae_impr": 0.10}, None, cfg)[0]
-    assert not registry.gate({"pearson_r": -0.01, "zptae_impr": 0.50}, None, cfg)[0]
-    assert not registry.gate({"pearson_r": 0.05, "zptae_impr": 0.05},
-                             {"zptae_impr": 0.10}, cfg)[0]
-    assert registry.gate({"pearson_r": 0.05, "zptae_impr": 0.12},
-                         {"zptae_impr": 0.10}, cfg)[0]
+    # positive r, no current -> promote
+    assert registry.gate({"pearson_r": 0.05, "whitelist_passed": 3, "zptae_impr": 0.1}, None, cfg)[0]
+    # non-positive r -> reject
+    assert not registry.gate({"pearson_r": -0.01, "whitelist_passed": 8}, None, cfg)[0]
+    # more criteria passed -> promote
+    assert registry.gate({"pearson_r": 0.05, "whitelist_passed": 4, "zptae_impr": 0.0},
+                         {"whitelist_passed": 3, "zptae_impr": 0.5}, cfg)[0]
+    # fewer criteria passed -> reject
+    assert not registry.gate({"pearson_r": 0.05, "whitelist_passed": 2, "zptae_impr": 0.9},
+                             {"whitelist_passed": 3, "zptae_impr": 0.1}, cfg)[0]
+    # tie on criteria, better zptae -> promote
+    assert registry.gate({"pearson_r": 0.05, "whitelist_passed": 3, "zptae_impr": 0.2},
+                         {"whitelist_passed": 3, "zptae_impr": 0.1}, cfg)[0]
 
 
 def test_run_once_creates_portable_predict():
@@ -73,7 +89,7 @@ def test_run_once_creates_portable_predict():
     assert os.path.exists(cfg.metrics_path)
 
     predict = export.load_predict(pkl)
-    out = predict(_DATA.tail(200))
+    out = predict(_DATA.tail(500))   # richer features need ~300 candles of warmup
     assert isinstance(out, float)
 
     # metadata carries the whitelist readout and calibration scale
