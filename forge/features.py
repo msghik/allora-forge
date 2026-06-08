@@ -130,7 +130,9 @@ def add_cross_features(primary_feats, ref_df, prefix="eth"):
     out["x_corr_48"] = b_lr.rolling(48).corr(x_lr)
     out["x_beta_48"] = b_lr.rolling(48).cov(x_lr) / (x_lr.rolling(48).var() + EPS)
 
-    out.dropna(inplace=True)
+    # Drop only on the cross columns -- never blanket-dropna, or all-NaN raw
+    # passthrough columns (e.g. taker-buy when the exchange omits it) wipe every row.
+    out.dropna(subset=cross_feature_cols(prefix), inplace=True)
     return out
 
 

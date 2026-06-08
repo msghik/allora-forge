@@ -39,6 +39,8 @@ def _raw_klines(ex, symbol, timeframe, since, limit):
     getter = getattr(ex, "publicGetKlines", None) or getattr(ex, "public_get_klines", None)
     if getter is None:
         return None
+    if not getattr(ex, "markets", None):   # ex.market() needs markets loaded first
+        ex.load_markets()
     market = ex.market(symbol)
     params = {"symbol": market["id"], "interval": timeframe, "limit": min(limit, 1000)}
     if since is not None:
@@ -219,7 +221,9 @@ def _paginate_funding(ex, symbol, since_ms):
 
 
 def _paginate_oi(ex, symbol, timeframe, since_ms):
-    out, since = [], since_ms
+    # Binance open-interest history is limited to ~30 days; older startTime is rejected.
+    earliest = ex.milliseconds() - 29 * 24 * 3600 * 1000
+    out, since = [], max(since_ms or 0, earliest)
     while True:
         batch = ex.fetch_open_interest_history(symbol, timeframe, since=since, limit=500)
         if not batch:

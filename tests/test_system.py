@@ -94,6 +94,27 @@ def test_futures_features_neutral_and_real():
     assert float(real["oi_change_12"].abs().sum()) > 0.0
 
 
+def test_core_ohlcv_fallback_no_row_wipe():
+    """Regression: when raw klines fall back to core OHLCV the order-flow columns
+    are all-NaN; they must NOT wipe every row via a blanket dropna (the live
+    'insufficient data: 0 rows' crash)."""
+    btc = _DATA["BTC/USDT"].iloc[:6000].copy()
+    eth = _DATA["ETH/USDT"].iloc[:6000].copy()
+    for c in ("quote_volume", "trades", "taker_buy_base"):
+        btc[c] = np.nan          # simulate ccxt core-OHLCV fallback (no order flow)
+        eth[c] = np.nan
+    fut = pd.DataFrame({"funding_rate": np.linspace(-1e-4, 2e-4, 200),
+                        "open_interest": np.full(200, np.nan)},   # OI fetch failed
+                       index=pd.date_range("2024-01-01", periods=200, freq="8h")).rename_axis("date")
+    cols = features.active_feature_cols("eth", use_orderflow=True, use_futures=True)
+    feats = features.build_features(btc, ref_df=eth, cross_prefix="eth", fut_df=fut,
+                                    use_orderflow=True, use_futures=True)
+    from forge import train
+    X, y = train.build_target(feats, 12, cols)
+    assert len(X) > 1000 and not X.isna().any().any()
+    assert float(X[features.ORDERFLOW_COLS].abs().sum().sum()) == 0.0  # neutral, not NaN
+
+
 def test_gate_logic():
     cfg = Config.from_env()
     assert registry.gate({"pearson_r": 0.05, "whitelist_passed": 3, "zptae_impr": 0.1}, None, cfg)[0]

@@ -19,10 +19,11 @@ EPS = 1e-12
 
 def build_target(df_features, horizon: int, feature_cols=None):
     r"""target_t = ln(Close_{t+H} / Close_t); drop the H trailing NaN rows."""
-    feature_cols = feature_cols or FEATURE_COLS
+    feature_cols = list(feature_cols or FEATURE_COLS)
     data = df_features.copy()
     data["target"] = np.log(data["close"].shift(-horizon) / data["close"])
-    data = data.dropna(subset=["target"])
+    # Never train on NaN: drop on the feature columns + target (not other passthrough cols).
+    data = data.dropna(subset=feature_cols + ["target"])
     return data[feature_cols].copy(), data["target"].copy()
 
 
