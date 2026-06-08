@@ -178,6 +178,17 @@ def test_run_once_sign_aware_portable():
         or str(meta.get("model", "")).startswith("Blend")
 
 
+def test_walk_forward_ablation():
+    """The ablation harness runs over the stores written by run_once and returns a
+    per-config DA summary (relative comparison; absolute DA is ~0.5 on noise)."""
+    from forge import research
+    cfg = Config.from_env()
+    summary = research.walk_forward_ablation(cfg, n_folds=2)
+    assert "base+cross" in summary
+    for name, row in summary.items():
+        assert 0.0 <= row["lgbm_da"] <= 1.0 and "best" in row
+
+
 def test_server_inference_returns_float(monkeypatch):
     cfg = Config.from_env()
     versions = registry.list_versions(cfg)

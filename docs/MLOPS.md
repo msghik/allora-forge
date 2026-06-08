@@ -64,6 +64,7 @@ competition's own metrics, and serves inferences to an Allora worker node.
 | `pipeline.py` | Cycle (`--once`) / daily loop (`--loop`): trains regressor/classifier/blend candidates, per-candidate **calibration-ratio search** + **whitelist-aware** (DA-first) winner selection. |
 | `server.py` | FastAPI worker: `/inference/{token}`, `/health`, `/metadata`; fetches primary + cross + futures; hot-reloads on promotion. |
 | `monitor.py` | Live-prediction logging, reconciliation vs realized 1h returns, alerts. |
+| `research.py` | **Walk-forward ablation** (`python -m forge.research`): mean±std DA per feature block over several folds, so feature decisions aren't single-run noise. |
 
 ## Run it (full stack)
 ```bash
