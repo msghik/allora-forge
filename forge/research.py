@@ -23,7 +23,7 @@ import pandas as pd
 from . import data, evaluate, onchain, train
 from .config import Config
 from .features import (FEATURE_COLS, FUTURES_COLS, ONCHAIN_COLS, ORDERFLOW_COLS,
-                       build_features, cross_feature_cols)
+                       active_feature_cols, build_features, cross_feature_cols)
 
 log = logging.getLogger("forge.research")
 
@@ -133,12 +133,60 @@ def walk_forward_ablation(config: Config, n_folds: int = 5) -> dict:
     return summary
 
 
+def tune_lgbm(config: Config, n_folds: int = 5) -> list:
+    """Grid-search LightGBM hyperparameters by **mean walk-forward DA** on the active
+    feature config (the metric we're judged on, not MSE). Prints the ranking."""
+    feats = _load_full_features(config)
+    cols = active_feature_cols(config.cross_prefix, True, config.use_futures, config.use_onchain)
+    X, y = train.build_target(feats, config.horizon_steps, cols)
+    n = len(X)
+    folds, val_len = _folds(n, n_folds)
+    step = config.horizon_steps if config.eval_nonoverlap else 1
+    grid = [{"num_leaves": nl, "max_depth": md, "min_child_samples": mc,
+             "n_estimators": ne, "learning_rate": lr}
+            for nl in (15, 31, 63) for md in (3, 5) for mc in (100, 400)
+            for ne in (600,) for lr in (0.02, 0.05)]
+    log.info("tuning %d param sets x %d folds on %d features (%d rows)", len(grid), n_folds, len(cols), n)
+
+    scored = []
+    for params in grid:
+        das, rs = [], []
+        for v0, v1 in folds:
+            tr_end = max(0, v0 - config.purge)
+            idx_tr, idx_va = X.index[:tr_end], X.index[v0:v1]
+            w = train.recency_weights(idx_tr, config.recency_half_life_days)
+            m = train.make_lgbm(config, **params)
+            m.fit(X.loc[idx_tr], y.loc[idx_tr], sample_weight=w)
+            da, r = _score(m.predict(X.loc[idx_va]), y.loc[idx_va].values, step)
+            das.append(da)
+            rs.append(r)
+        scored.append((float(np.mean(das)), float(np.std(das)), float(np.mean(rs)), params))
+    scored.sort(key=lambda t: -t[0])
+
+    print(f"\n{'mean DA':>9} {'std':>6} {'mean r':>7}  params")
+    print("-" * 78)
+    for da, sd, r, p in scored[:8]:
+        ps = f"leaves={p['num_leaves']} depth={p['max_depth']} min_child={p['min_child_samples']} lr={p['learning_rate']}"
+        print(f"{da:>9.3f} {sd:>6.3f} {r:>7.3f}  {ps}")
+    best = scored[0]
+    print("-" * 78)
+    print(f"best: mean DA {best[0]:.3f} +/- {best[1]:.3f} | {best[3]}")
+    print("set these in forge/config.py lgbm_params if they beat the current default.\n")
+    return scored
+
+
 def main() -> None:
     logging.basicConfig(level=os.environ.get("ALLORA_LOG_LEVEL", "INFO"),
                         format="%(asctime)s %(levelname)s %(name)s | %(message)s")
-    ap = argparse.ArgumentParser(description="Walk-forward feature ablation")
+    ap = argparse.ArgumentParser(description="Walk-forward feature ablation / tuning")
     ap.add_argument("--folds", type=int, default=5)
-    walk_forward_ablation(Config.from_env(), n_folds=ap.parse_args().folds)
+    ap.add_argument("--tune", action="store_true", help="DA-targeted LightGBM hyperparameter search")
+    args = ap.parse_args()
+    config = Config.from_env()
+    if args.tune:
+        tune_lgbm(config, n_folds=args.folds)
+    else:
+        walk_forward_ablation(config, n_folds=args.folds)
 
 
 if __name__ == "__main__":

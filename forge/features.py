@@ -39,7 +39,8 @@ FEATURE_COLS = [
 
 # Real order-flow features (need taker-buy volume / trade count from raw klines).
 ORDERFLOW_COLS = [
-    "taker_buy_ratio_z", "ofi_12", "ofi_48", "cvd_slope_24",
+    "taker_buy_ratio_z", "ofi_3", "ofi_12", "ofi_48", "ofi_96",
+    "cvd_slope_24", "cvd_div_12", "taker_accel",
     "trade_intensity_z", "avg_trade_size_z",
 ]
 
@@ -337,10 +338,16 @@ def add_features(df, use_orderflow: bool = False):
             tb = data["taker_buy_base"].astype("float64")
             delta = 2.0 * tb - v                      # buy volume - sell volume
             data["taker_buy_ratio_z"] = zscore(tb / (v + EPS), 96)
-            data["ofi_12"] = delta.rolling(12).sum() / (v.rolling(12).sum() + EPS)
-            data["ofi_48"] = delta.rolling(48).sum() / (v.rolling(48).sum() + EPS)
+            # order-flow imbalance at several horizons (15m / 1h / 4h / 8h)
+            for k in (3, 12, 48, 96):
+                data[f"ofi_{k}"] = delta.rolling(k).sum() / (v.rolling(k).sum() + EPS)
             cvd = delta.cumsum()
             data["cvd_slope_24"] = (cvd - cvd.shift(24)) / (v.rolling(24).sum() + EPS)
+            # flow-vs-price divergence (buying pressure exceeding price move = accumulation)
+            flow_12 = delta.rolling(12).sum()
+            data["cvd_div_12"] = zscore(flow_12, 96) - zscore(data["ret_12"], 96)
+            # acceleration of aggressive buying
+            data["taker_accel"] = zscore((tb / (v + EPS)).diff(3), 96)
             trades = data["trades"].astype("float64") if "trades" in data.columns \
                 else pd.Series(np.nan, index=data.index)
             data["trade_intensity_z"] = zscore(trades, 96)

@@ -28,7 +28,7 @@ class Config:
     # --- alt-data sources ---
     use_orderflow: bool = True        # taker-buy volume / CVD / trade-intensity features (raw klines)
     futures_exchange: str = "binance"  # where to pull funding/OI (binanceus has no futures)
-    futures_symbol: str = "BTC/USDT:USDT"  # perpetual swap symbol ("" disables futures features)
+    futures_symbol: str = ""           # perp swap symbol; OFF by default (ablation showed futures hurt 1h DA)
     # On-chain via Dune Analytics: one saved query per canonical metric returning
     # (ts, value). Enabled when an API key + at least one query id are set.
     dune_api_key: str = ""
