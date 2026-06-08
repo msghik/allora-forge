@@ -209,7 +209,11 @@ def get_recent_candles(config, symbol=None, limit=None, fetcher=None) -> pd.Data
 def _paginate_funding(ex, symbol, since_ms):
     out, since = [], since_ms
     while True:
-        batch = ex.fetch_funding_rate_history(symbol, since=since, limit=1000)
+        try:
+            batch = ex.fetch_funding_rate_history(symbol, since=since, limit=1000)
+        except Exception as exc:  # noqa: BLE001 -- keep whatever we already collected
+            log.warning("[futures] funding page failed (%s); keeping %d rows", exc, len(out))
+            break
         if not batch:
             break
         out += batch
@@ -225,7 +229,11 @@ def _paginate_oi(ex, symbol, timeframe, since_ms):
     earliest = ex.milliseconds() - 29 * 24 * 3600 * 1000
     out, since = [], max(since_ms or 0, earliest)
     while True:
-        batch = ex.fetch_open_interest_history(symbol, timeframe, since=since, limit=500)
+        try:
+            batch = ex.fetch_open_interest_history(symbol, timeframe, since=since, limit=500)
+        except Exception as exc:  # noqa: BLE001 -- keep whatever we already collected
+            log.warning("[futures] open-interest page failed (%s); keeping %d rows", exc, len(out))
+            break
         if not batch:
             break
         out += batch
