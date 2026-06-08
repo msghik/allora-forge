@@ -87,15 +87,18 @@ def inference(token: str):
         raise HTTPException(status_code=503, detail="no market data available")
 
     cross_sym = meta.get("cross_symbol", "")
+    fut_sym = meta.get("futures_symbol", "")
     try:
+        ref_df = None
         if cross_sym:  # cross-asset model needs the reference asset too
             ref_df = data.get_recent_candles(config, cross_sym)
             if ref_df.empty:
                 raise HTTPException(status_code=503,
                                     detail=f"no market data for {cross_sym}")
-            value = _predict(df, ref_df)
-        else:
-            value = _predict(df)
+        fut_df = None
+        if fut_sym:  # futures model: fetch funding/OI (degrades to neutral if empty)
+            fut_df = data.get_recent_futures(config, fut_sym)
+        value = _predict(df, ref_df, fut_df)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

@@ -52,15 +52,16 @@ competition's own metrics, and serves inferences to an Allora worker node.
 ## Components (`forge/`)
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | Typed `Config`: `timeframe=5m`, `horizon_steps=12`, rolling window, calibration grid, model params, paths; env overrides. |
-| `data.py` | Per-symbol incremental 5m OHLCV ingest (BTC **and** the cross asset), dedup/gap checks, CSV store, recent-candle fetch (store fallback). |
-| `features.py` | Canonical pure-pandas `add_features` (~37 single-asset features) **+ `add_cross_features`** (~11 cross-asset: ETH momentum/vol/lags, return spread, rolling correlation & beta) → 48 total via `build_features`. All scale-free. |
-| `train.py` | 1h target, chronological split, regularized Ridge (TS-CV α) + LightGBM (early stopping), **variance-calibration** factor. |
+| `config.py` | Typed `Config`: `timeframe=5m`, `horizon_steps=12`, rolling window, calibration grid, model params, **alt-data + sign-aware flags**, paths; env overrides. |
+| `data.py` | Per-symbol incremental 5m ingest with **order-flow columns** (taker-buy volume / trades / quote volume from raw klines) for BTC **and** the cross asset, **plus a futures store** (funding rate + open interest); dedup/gap checks, CSV stores, recent-candle/futures fetch (store fallback). |
+| `features.py` | Canonical pure-pandas `add_features` (~37 single-asset) **+ order-flow** (CVD/OFI/taker-buy/trade-intensity) **+ `add_cross_features`** (ETH lead-lag/spread/corr/beta) **+ `add_futures_features`** (funding z/carry, OI change & price divergence) → up to **60** features via `build_features`. All scale-free; optional blocks degrade to neutral if a source is missing. |
+| `estimators.py` | `SignMagnitudePredictor` (classifier → signed return) and `BlendPredictor` (regressor × classifier) — uniform `.predict`, pickled by value. |
+| `train.py` | 1h target, **purged** chronological split, **recency-weighted** Ridge + LightGBM regressors **and a LightGBM directional classifier**, **variance-calibration** factor. |
 | `evaluate.py` | Competition metrics (ZPTAE surrogate, WRMSE, DA + Wilson CI + binomial p, Pearson + p, log-aspect) on non-overlapping windows + whitelist pass/fail. |
 | `registry.py` | Versioned store, **promotion gate** (whitelist-criteria-passed → ZPTAE tiebreak, Pearson floor, no-regression), rollback, metrics log. |
-| `export.py` | `predict()` closure with calibration `scale` + cloudpickle (features by value → portable predict.pkl). |
-| `pipeline.py` | Cycle (`--once`) / daily loop (`--loop`): per-candidate **calibration-ratio search** + **whitelist-aware** winner selection. |
-| `server.py` | FastAPI worker: `/inference/{token}`, `/health`, `/metadata`; hot-reloads on promotion. |
+| `export.py` | `predict(df, ref_df, fut_df)` closure with calibration `scale` + cloudpickle (feature **and** estimator code by value → portable predict.pkl). |
+| `pipeline.py` | Cycle (`--once`) / daily loop (`--loop`): trains regressor/classifier/blend candidates, per-candidate **calibration-ratio search** + **whitelist-aware** (DA-first) winner selection. |
+| `server.py` | FastAPI worker: `/inference/{token}`, `/health`, `/metadata`; fetches primary + cross + futures; hot-reloads on promotion. |
 | `monitor.py` | Live-prediction logging, reconciliation vs realized 1h returns, alerts. |
 
 ## Run it (full stack)
@@ -89,23 +90,44 @@ First boot trains immediately (cold-start fetch of ~120 days of 5m candles), the
 - **Alerts:** set `ALLORA_ALERT_WEBHOOK` for training failures / rejected (regressing) candidates.
 
 ## Improving DA (the real alpha)
-The model uses ~48 scale-free features (single-asset multi-scale momentum/vol,
-trend, oscillators, volume/order-flow, microstructure, regime, cyclical time
-**plus cross-asset ETH↔BTC** lead-lag/spread/correlation/beta), a per-cycle
-calibration search, and whitelist-aware selection. The cross-asset model needs
-both assets at inference, so `predict(df, ref_df)` takes a reference DataFrame and
-the **server fetches both** (controlled by `cross_symbol`); `predict.pkl` stays
-self-contained. Clearing `DA > 0.55` on 1h crypto is still hard — remaining
-levers, roughly by expected impact:
-- **Alt-data**: order-book imbalance/depth, funding/open-interest, on-chain (gas,
-  active addresses) — the data sources the rules suggest.
-- **ZPTAE-direct training** (custom objective) and **model ensembling**.
-- **More history** (`ALLORA_TRAIN_WINDOW_DAYS=365`) to tighten the DA CI.
+The whitelist is **directional-accuracy heavy** (3 of 8 criteria), so the system
+attacks DA on two fronts:
 
-> Note: WRMSE/WZPTAE-improvement-over-zero are effectively unreachable at realistic
-> r (~0.1) — they'd need r≈0.4+. Target the **DA cluster + Pearson + log-aspect**
-> (six achievable criteria); the framework scores all eight per cycle in
-> `models/metrics.jsonl`.
+1. **A DA-aligned objective.** MSE regression optimizes magnitude, not sign. So
+   alongside the Ridge/LightGBM regressors we train a **LightGBM directional
+   classifier** (log-loss on up/down, sample-weighted by |return| so it focuses on
+   decisive moves) and **regressor×classifier blends**, then select the candidate
+   that passes the **most whitelist criteria** (DA-first). Training is
+   **recency-weighted** (exponential half-life) to track the current regime and
+   uses a **purged** train/val boundary so the last targets don't leak.
+2. **Genuinely new information.** Up to **60 scale-free features**: single-asset
+   momentum/vol/trend/oscillators/microstructure/regime/time, **cross-asset
+   ETH↔BTC** lead-lag/spread/corr/beta, **real order flow** (taker-buy volume →
+   CVD / order-flow imbalance / trade intensity, pulled from raw klines — the
+   signal ccxt's normalized OHLCV throws away), and **futures positioning**
+   (funding-rate carry/z-score, open-interest change & price divergence).
+
+The model can need all three inputs at inference, so `predict(df, ref_df, fut_df)`
+takes the reference asset and a futures frame, and the **server fetches all of
+them** (controlled by `cross_symbol` / `futures_symbol`). Missing alt-data
+degrades to neutral features rather than failing, and `predict.pkl` stays
+self-contained (feature + estimator code travel by value).
+
+> **A note on honest sample size.** `DA ci_lo > 0.52` punishes small samples: a
+> flattering DA on a few hundred non-overlapping windows (`±0.04` CI) is not the
+> same as a real edge on a large window (`±0.02`). Train on a long window
+> (`ALLORA_TRAIN_WINDOW_DAYS=365`) and trust the CI, not the point estimate.
+
+> **Data-source caveats.** Order flow + futures need a **binance-family** /
+> futures-enabled exchange (binanceus has no futures; set `ALLORA_FUTURES_EXCHANGE`
+> / `ALLORA_EXCHANGE=binance` outside the US). Open-interest history is
+> exchange-limited to ~30 days — recency weighting leans on the recent period
+> where it's present.
+
+> **Structural ceiling.** WRMSE/WZPTAE-improvement-over-zero are effectively
+> unreachable at realistic r (~0.1) — they'd need r≈0.4+. Target the **DA cluster
+> + Pearson + log-aspect** (six achievable criteria); the framework scores all
+> eight per cycle in `models/metrics.jsonl`.
 
 ## Local (no Docker)
 ```bash

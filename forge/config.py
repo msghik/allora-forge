@@ -4,6 +4,11 @@ Tuned for the Forge competition: **1-hour-ahead log-return**, polled every 5
 minutes, scored with ZPTAE + the whitelist metric bundle. Defaults model on
 5-minute candles with a 12-bar (=1h) horizon. Single asset (BTC) for now; the
 code is symbol-parametrized so adding ETH is a config change.
+
+Beyond price/volume it can ingest **order flow** (taker-buy volume / CVD from raw
+klines) and **futures alt-data** (funding rate + open interest), and it trains
+**sign-aware** candidates (a directional classifier + a regressor/classifier
+blend) with **recency-weighted**, **purged** splits.
 """
 from __future__ import annotations
 
@@ -20,11 +25,21 @@ class Config:
     timeframe: str = "5m"             # base candle resolution (matches 5-min poll cadence)
     horizon_steps: int = 12           # bars ahead = 1 hour at 5m (12 * 5m)
 
+    # --- alt-data sources ---
+    use_orderflow: bool = True        # taker-buy volume / CVD / trade-intensity features (raw klines)
+    futures_exchange: str = "binance"  # where to pull funding/OI (binanceus has no futures)
+    futures_symbol: str = "BTC/USDT:USDT"  # perpetual swap symbol ("" disables futures features)
+
     # --- training ---
     train_window_days: int = 180      # rolling window of 5m bars (~52k rows)
     val_fraction: float = 0.2         # chronological holdout
     min_train_rows: int = 2000
     random_state: int = 42
+    recency_half_life_days: float = 45.0   # exponential sample-weight half-life (0 disables)
+    purge_steps: int = -1             # rows purged at the train/val boundary (-1 => horizon_steps)
+    use_classifier: bool = True       # add a directional (sign) classifier candidate
+    use_ensemble: bool = True         # add regressor x classifier blend candidates
+    ensemble_weights: tuple = (0.35, 0.5, 0.65)  # blend mix grid (regressor weight)
     ridge_alphas: tuple = (0.1, 1.0, 10.0, 30.0, 100.0, 300.0, 1000.0)
     lgbm_params: dict = field(default_factory=lambda: dict(
         n_estimators=2000, learning_rate=0.03, num_leaves=31, max_depth=4,
@@ -74,6 +89,10 @@ class Config:
         sym = symbol.replace("/", "")
         return os.path.join(self.data_dir, f"ohlcv_{sym}_{self.timeframe}.csv")
 
+    def futures_path_for(self, symbol: str) -> str:
+        sym = symbol.replace("/", "").replace(":", "")
+        return os.path.join(self.data_dir, f"futures_{sym}.csv")
+
     @property
     def data_path(self) -> str:
         return self.data_path_for(self.symbol)
@@ -82,6 +101,15 @@ class Config:
     def cross_prefix(self) -> str | None:
         """Short name for the reference asset (e.g. 'eth'), or None if disabled."""
         return self.cross_symbol.split("/")[0].lower() if self.cross_symbol else None
+
+    @property
+    def use_futures(self) -> bool:
+        return bool(self.futures_symbol)
+
+    @property
+    def purge(self) -> int:
+        """Rows dropped at the train/val boundary to avoid horizon leakage."""
+        return self.horizon_steps if self.purge_steps < 0 else self.purge_steps
 
     @property
     def current_dir(self) -> str:
@@ -119,6 +147,13 @@ class Config:
     def as_dict(self) -> dict:
         return asdict(self)
 
+    @staticmethod
+    def _flag(name: str, default: bool) -> bool:
+        v = os.environ.get(name)
+        if v is None:
+            return default
+        return v.strip().lower() in ("1", "true", "yes", "on")
+
     @classmethod
     def from_env(cls) -> "Config":
         c = cls()
@@ -127,7 +162,16 @@ class Config:
         c.cross_symbol = os.environ.get("ALLORA_CROSS_SYMBOL", c.cross_symbol)
         c.timeframe = os.environ.get("ALLORA_TIMEFRAME", c.timeframe)
         c.horizon_steps = int(os.environ.get("ALLORA_HORIZON_STEPS", c.horizon_steps))
+        c.use_orderflow = cls._flag("ALLORA_USE_ORDERFLOW", c.use_orderflow)
+        c.futures_exchange = os.environ.get("ALLORA_FUTURES_EXCHANGE", c.futures_exchange)
+        c.futures_symbol = os.environ.get("ALLORA_FUTURES_SYMBOL", c.futures_symbol)
         c.train_window_days = int(os.environ.get("ALLORA_TRAIN_WINDOW_DAYS", c.train_window_days))
+        c.recency_half_life_days = float(
+            os.environ.get("ALLORA_RECENCY_HALF_LIFE_DAYS", c.recency_half_life_days))
+        if "ALLORA_PURGE_STEPS" in os.environ:
+            c.purge_steps = int(os.environ["ALLORA_PURGE_STEPS"])
+        c.use_classifier = cls._flag("ALLORA_USE_CLASSIFIER", c.use_classifier)
+        c.use_ensemble = cls._flag("ALLORA_USE_ENSEMBLE", c.use_ensemble)
         if "ALLORA_CALIBRATION_RATIO" in os.environ:  # fix the ratio (disable search)
             r = float(os.environ["ALLORA_CALIBRATION_RATIO"])
             c.calibration_target_ratio = r

@@ -26,9 +26,20 @@ then daily. The promoted artifact lands at `models/current/predict.pkl` (upload 
 the Forge) and the inference server is ready for
 [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node)
 (see `allora/config.example.json`). Local equivalents: `make train`, `make serve`,
-`make test`. The BTC model also uses **cross-asset ETH features** (the server
-fetches both); for the ETH topic, run a second stack with `ALLORA_SYMBOL=ETH/USDT`
-and `ALLORA_CROSS_SYMBOL=BTC/USDT`.
+`make test`.
+
+Because the whitelist is **directional-accuracy heavy**, the worker trains
+**sign-aware** candidates (a directional LightGBM classifier + regressor×classifier
+blends, recency-weighted with a purged split) and feeds them up to **60 scale-free
+features**: single-asset technicals, **cross-asset ETH↔BTC** lead-lag, **real order
+flow** (taker-buy volume / CVD from raw klines), and **futures positioning**
+(funding rate + open interest). The model therefore takes
+`predict(df, ref_df, fut_df)` and the **server fetches all three** (controlled by
+`cross_symbol` / `futures_symbol`); missing alt-data degrades to neutral and
+`predict.pkl` stays self-contained. Order flow + futures need a binance-family /
+futures-enabled exchange (set `ALLORA_EXCHANGE=binance` / `ALLORA_FUTURES_EXCHANGE`
+outside the US). For the ETH topic, run a second stack with `ALLORA_SYMBOL=ETH/USDT`,
+`ALLORA_CROSS_SYMBOL=BTC/USDT`, `ALLORA_FUTURES_SYMBOL=ETH/USDT:USDT`.
 
 ## Reference: one-shot 24h pipeline
 

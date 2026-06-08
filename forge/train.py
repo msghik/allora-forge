@@ -1,10 +1,20 @@
-"""Model training: target construction, chronological split, and the two
-regularized candidate models (Ridge + LightGBM)."""
+"""Model training: target construction, purged chronological split, recency
+weighting, and the candidate learners.
+
+Candidates are intentionally diverse so the pipeline can pick whatever scores
+best on the (directional-accuracy-heavy) whitelist:
+  * **Ridge** / **LightGBM** regressors  -- magnitude (good for Pearson r),
+  * a **LightGBM classifier** wrapped as a signed predictor -- optimizes the sign
+    directly (good for directional accuracy),
+  * **blends** of the two.
+"""
 from __future__ import annotations
 
 import numpy as np
 
 from .features import FEATURE_COLS
+
+EPS = 1e-12
 
 
 def build_target(df_features, horizon: int, feature_cols=None):
@@ -16,9 +26,27 @@ def build_target(df_features, horizon: int, feature_cols=None):
     return data[feature_cols].copy(), data["target"].copy()
 
 
-def chrono_split(X, y, val_fraction: float):
+def chrono_split(X, y, val_fraction: float, purge: int = 0):
+    """Chronological split with a purge gap so the last train targets (which look
+    ``horizon`` bars ahead) don't overlap the validation window."""
     cut = int(len(X) * (1.0 - val_fraction))
-    return X.iloc[:cut], X.iloc[cut:], y.iloc[:cut], y.iloc[cut:]
+    tr_end = max(0, cut - max(0, purge))
+    return X.iloc[:tr_end], X.iloc[cut:], y.iloc[:tr_end], y.iloc[cut:]
+
+
+def recency_weights(index, half_life_days: float):
+    """Exponential-decay sample weights (newest = 1.0). None disables weighting."""
+    if not half_life_days or half_life_days <= 0:
+        return None
+    age_days = np.asarray((index.max() - index).total_seconds(), dtype=float) / 86400.0
+    return np.power(0.5, age_days / float(half_life_days))
+
+
+def _combine_weights(base, magnitude):
+    """Multiply recency weights by a normalized |target| emphasis (decisive moves)."""
+    mag = np.abs(np.asarray(magnitude, dtype=float))
+    mag = mag / (mag.mean() + EPS)
+    return mag if base is None else base * mag
 
 
 # ----- Ridge -----
@@ -29,21 +57,30 @@ def make_ridge(alpha: float):
     return Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=alpha))])
 
 
-def train_ridge(X_tr, y_tr, config):
-    """Fit Ridge with alpha chosen by TimeSeriesSplit CV on the train set."""
+def fit_ridge(alpha: float, X, y, sample_weight=None):
+    m = make_ridge(alpha)
+    if sample_weight is not None:
+        m.fit(X, y, ridge__sample_weight=sample_weight)
+    else:
+        m.fit(X, y)
+    return m
+
+
+def train_ridge(X_tr, y_tr, config, sample_weight=None):
+    """Pick alpha by TimeSeriesSplit CV, then refit (optionally weighted)."""
     from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
-    pipe = make_ridge(alpha=1.0)
     n_splits = max(2, min(5, len(X_tr) // 100))
     gs = GridSearchCV(
-        pipe, {"ridge__alpha": list(config.ridge_alphas)},
+        make_ridge(alpha=1.0), {"ridge__alpha": list(config.ridge_alphas)},
         cv=TimeSeriesSplit(n_splits=n_splits),
         scoring="neg_mean_squared_error", n_jobs=-1,
     )
     gs.fit(X_tr, y_tr)
-    return gs.best_estimator_, {"alpha": float(gs.best_params_["ridge__alpha"])}
+    alpha = float(gs.best_params_["ridge__alpha"])
+    return fit_ridge(alpha, X_tr, y_tr, sample_weight), {"alpha": alpha}
 
 
-# ----- LightGBM -----
+# ----- LightGBM regressor -----
 def make_lgbm(config, **overrides):
     from lightgbm import LGBMRegressor
     params = {**config.lgbm_params, "random_state": config.random_state,
@@ -51,9 +88,12 @@ def make_lgbm(config, **overrides):
     return LGBMRegressor(**params)
 
 
-def train_lgbm(X_tr, y_tr, config):
-    """Fit LightGBM with early stopping on an inner tail of the train set, then
-    refit on the full train set with the chosen number of trees."""
+def _best_iter(probe, fallback):
+    return int(probe.best_iteration_ or fallback)
+
+
+def train_lgbm(X_tr, y_tr, config, sample_weight=None):
+    """Early-stop on an inner tail, then refit on the full train set (weighted)."""
     from lightgbm import early_stopping, log_evaluation
     inner_cut = int(len(X_tr) * 0.85)
     X_in, X_es = X_tr.iloc[:inner_cut], X_tr.iloc[inner_cut:]
@@ -62,21 +102,47 @@ def train_lgbm(X_tr, y_tr, config):
     probe = make_lgbm(config)
     probe.fit(X_in, y_in, eval_set=[(X_es, y_es)], eval_metric="l2",
               callbacks=[early_stopping(50, verbose=False), log_evaluation(0)])
-    best_iter = int(probe.best_iteration_ or config.lgbm_params["n_estimators"])
+    n = _best_iter(probe, config.lgbm_params["n_estimators"])
+    model = make_lgbm(config, n_estimators=n)
+    model.fit(X_tr, y_tr, sample_weight=sample_weight)
+    return model, {"n_estimators": n}
 
-    model = make_lgbm(config, n_estimators=best_iter)
-    model.fit(X_tr, y_tr)
-    return model, {"n_estimators": best_iter}
+
+# ----- LightGBM classifier (directional) -----
+def make_lgbm_classifier(config, **overrides):
+    from lightgbm import LGBMClassifier
+    params = {**config.lgbm_params, "random_state": config.random_state,
+              "n_jobs": -1, **overrides}
+    params.pop("objective", None)
+    return LGBMClassifier(**params)
 
 
-def fit_final(name: str, params: dict, X, y, config):
-    """Refit the winning model on the full (windowed) dataset for deployment."""
+def train_lgbm_classifier(X_tr, y_tr, config, sample_weight=None):
+    """Binary up/down classifier, early-stopped on log-loss then refit (weighted)."""
+    from lightgbm import early_stopping, log_evaluation
+    label = (y_tr.values > 0).astype(int)
+    inner_cut = int(len(X_tr) * 0.85)
+    X_in, X_es = X_tr.iloc[:inner_cut], X_tr.iloc[inner_cut:]
+    y_in, y_es = label[:inner_cut], label[inner_cut:]
+
+    probe = make_lgbm_classifier(config)
+    probe.fit(X_in, y_in, eval_set=[(X_es, y_es)], eval_metric="binary_logloss",
+              callbacks=[early_stopping(50, verbose=False), log_evaluation(0)])
+    n = _best_iter(probe, config.lgbm_params["n_estimators"])
+    model = make_lgbm_classifier(config, n_estimators=n)
+    model.fit(X_tr, label, sample_weight=sample_weight)
+    return model, {"n_estimators": n}
+
+
+def fit_final(name: str, params: dict, X, y, config, sample_weight=None):
+    """Refit a base learner on the full (windowed) dataset for deployment."""
     if name == "Ridge":
-        model = make_ridge(alpha=params["alpha"])
-    else:
-        model = make_lgbm(config, n_estimators=params["n_estimators"])
-    model.fit(X, y)
-    return model
+        return fit_ridge(params["alpha"], X, y, sample_weight)
+    if name == "LightGBM":
+        m = make_lgbm(config, n_estimators=params["n_estimators"])
+        m.fit(X, y, sample_weight=sample_weight)
+        return m
+    raise ValueError(f"unknown model {name}")
 
 
 def calibration_scale(y_true, y_pred, target_ratio: float) -> float:
