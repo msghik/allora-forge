@@ -37,23 +37,38 @@ The `inference` service serves `GET /inference/{token}` on `:8000` and **hot-rel
 whenever the trainer promotes a new model. Keep the `trainer` service in `--loop`
 so it retrains daily and reconciles live predictions.
 
-## 4. allora-offchain-node (live submissions)
+## 4. allora-offchain-node (live submissions to topic 72)
 The live worker is [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node);
-it polls our endpoint and submits to the topic.
-1. Create/fund a testnet worker wallet (see that repo's README for `allorad` key
-   creation + the faucet). You need the **key name** and **restore mnemonic**.
-2. Copy `allora/config.example.json` to the offchain node as its `config.json` and fill in:
-   - `wallet.addressKeyName`, `wallet.addressRestoreMnemonic`
-   - `worker[0].topicId` → the **1h BTC topic id** from the competition page
-   - `parameters.InferenceEndpoint` → reach this repo's server:
-     - same Docker network: `http://inference:8000/inference/{Token}`
-     - otherwise: `http://<this-host-ip>:8000/inference/{Token}`
-3. Start it (join this stack's network so `inference` resolves, e.g.):
-   ```bash
-   docker run --rm --network allora-forge_default \
-     -v $PWD/config.json:/app/config.json alloranetwork/allora-offchain-node:latest
-   ```
-   (Match the image/flags to the offchain-node repo's current compose.)
+its `api-worker-reputer` adapter GETs our `/inference/{Token}` endpoint (a bare
+number) and submits it to the topic. Run it as its own stack pointed at our server:
+
+```bash
+# fund the worker wallet first (testnet faucet) -- use YOUR address:
+#   allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt
+git clone https://github.com/allora-network/allora-offchain-node && cd allora-offchain-node
+cp config.example.json config.json          # base on THEIR file so the schema matches your version
+```
+Edit `config.json` — set the wallet + the worker entry (values from this repo's
+`allora/config.example.json`):
+- `wallet.addressKeyName`: any label (e.g. `forge-worker`)
+- `wallet.addressRestoreMnemonic`: the mnemonic that restores `allo1uv65…` (never commit it)
+- `wallet.nodeRpc`: the current testnet RPC (e.g. `https://allora-rpc.testnet-1.testnet.allora.network/`)
+- `wallet.submitTx`: **true** (false = dry-run, earns nothing)
+- `worker[0].topicId`: **72**
+- `worker[0].inferenceEntrypointName`: `api-worker-reputer`
+- `worker[0].parameters.Token`: `BTC`
+- `worker[0].parameters.InferenceEndpoint`: `http://HOST_IP:8000/inference/{Token}`
+  (our inference server; `HOST_IP` = your server's IP, or `172.17.0.1` for the
+  Docker bridge gateway on Linux — confirm the offchain container can curl it)
+
+```bash
+chmod +x init.config && ./init.config       # imports the wallet, exports the config for compose
+docker compose up -d --build
+docker compose logs -f                       # watch it fetch /inference/BTC and submit (tx hash/round)
+```
+
+> Our inference stack must be up first (`docker compose up -d` in this repo) so
+> `HOST_IP:8000` answers. Keep both running.
 
 ## 5. Verify it's live
 - Offchain-node logs show it fetching `/inference/BTC` every loop and **submitting**

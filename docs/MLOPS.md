@@ -79,7 +79,7 @@ First boot trains immediately (cold-start fetch of ~120 days of 5m candles), the
 
 ### Wire to Allora
 - **Forge upload:** `models/current/predict.pkl` (also copied to repo-root on each promotion).
-- **Live worker node:** run [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node) with the BTC-1h topic id and `InferenceEndpoint = http://inference:8000/inference/{Token}` — see `allora/config.example.json`.
+- **Live worker node:** run [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node) on **topic 72** (1h BTC/USD) with `InferenceEndpoint` pointed at this server's `/inference/{Token}` — see `allora/config.example.json` and `docs/GOLIVE.md`.
 - **Add ETH:** copy the stack with `ALLORA_SYMBOL=ETH/USDT`, `ALLORA_TOPIC_TOKEN=ETH` (own data store + registry), and add the ETH topic to the offchain config.
 
 ## Operate

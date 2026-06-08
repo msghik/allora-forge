@@ -1,20 +1,24 @@
 {
-  "_comment": "Example allora-offchain-node config for the 1h BTC/USD log-return competition topic. Replace REPLACE_WITH_BTC_1H_TOPIC_ID with the topic id shown on the competition page, point InferenceEndpoint at this repo's inference server, and match the exact schema to your allora-offchain-node version: https://github.com/allora-network/allora-offchain-node",
+  "_comment": "allora-offchain-node config for Allora Forge TOPIC 72 (1h BTC/USD log-return, 5-min cadence). Worker wallet address: allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt -- put the MNEMONIC that restores THAT address in addressRestoreMnemonic (never commit it). Point InferenceEndpoint at this repo's inference server (replace HOST_IP with your server IP, or 172.17.0.1 for the Docker bridge gateway on Linux). IMPORTANT: clone allora-offchain-node and base your config.json on ITS config.example.json so field names match your version; copy the values below into it. submitTx MUST be true to actually submit and earn Hammers. Docs: https://docs.allora.network , repo: https://github.com/allora-network/allora-offchain-node",
   "wallet": {
-    "addressKeyName": "REPLACE_WITH_YOUR_KEY_NAME",
-    "addressRestoreMnemonic": "REPLACE_WITH_YOUR_MNEMONIC",
-    "nodeRpc": "https://allora-rpc.testnet.allora.network",
-    "maxFees": 1000000,
+    "addressKeyName": "forge-worker",
+    "addressRestoreMnemonic": "REPLACE_WITH_YOUR_MNEMONIC_FOR_allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt",
+    "alloraHomeDir": "/root/.allorad",
     "gas": "auto",
-    "gasAdjustment": 1.5
+    "gasAdjustment": 1.5,
+    "maxFees": 25000000,
+    "nodeRpc": "https://allora-rpc.testnet-1.testnet.allora.network/",
+    "maxRetries": 3,
+    "delay": 10,
+    "submitTx": true
   },
   "worker": [
     {
-      "topicId": "REPLACE_WITH_BTC_1H_TOPIC_ID",
+      "topicId": 72,
       "inferenceEntrypointName": "api-worker-reputer",
-      "loopSeconds": 60,
+      "loopSeconds": 5,
       "parameters": {
-        "InferenceEndpoint": "http://inference:8000/inference/{Token}",
+        "InferenceEndpoint": "http://HOST_IP:8000/inference/{Token}",
         "Token": "BTC"
       }
     }
