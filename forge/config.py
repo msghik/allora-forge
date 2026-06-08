@@ -195,8 +195,9 @@ class Config:
             c.purge_steps = int(os.environ["ALLORA_PURGE_STEPS"])
         c.use_classifier = cls._flag("ALLORA_USE_CLASSIFIER", c.use_classifier)
         c.use_ensemble = cls._flag("ALLORA_USE_ENSEMBLE", c.use_ensemble)
-        if "ALLORA_CALIBRATION_RATIO" in os.environ:  # fix the ratio (disable search)
-            r = float(os.environ["ALLORA_CALIBRATION_RATIO"])
+        cal = os.environ.get("ALLORA_CALIBRATION_RATIO", "").strip()
+        if cal:  # pin the ratio (disable the per-cycle search); empty -> search
+            r = float(cal)
             c.calibration_target_ratio = r
             c.calibration_ratio_grid = (r,)
         c.data_dir = os.environ.get("ALLORA_DATA_DIR", c.data_dir)
