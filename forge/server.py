@@ -80,16 +80,28 @@ def inference(token: str):
     _maybe_load()
     if _predict is None:
         raise HTTPException(status_code=503, detail="no model available yet")
-    df = data.get_recent_candles(config)
+    meta = registry.get_current_metadata(config) or {}
+
+    df = data.get_recent_candles(config, config.symbol)
     if df.empty:
         raise HTTPException(status_code=503, detail="no market data available")
+
+    cross_sym = meta.get("cross_symbol", "")
     try:
-        value = _predict(df)
+        if cross_sym:  # cross-asset model needs the reference asset too
+            ref_df = data.get_recent_candles(config, cross_sym)
+            if ref_df.empty:
+                raise HTTPException(status_code=503,
+                                    detail=f"no market data for {cross_sym}")
+            value = _predict(df, ref_df)
+        else:
+            value = _predict(df)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.exception("inference failed")
         raise HTTPException(status_code=500, detail=f"inference error: {exc}")
 
-    meta = registry.get_current_metadata(config) or {}
     monitor.log_prediction(config, value, float(df["close"].iloc[-1]),
                            meta.get("version", "unknown"))
     log.info("inference token=%s -> %.6f", token, value)

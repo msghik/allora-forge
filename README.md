@@ -26,7 +26,9 @@ then daily. The promoted artifact lands at `models/current/predict.pkl` (upload 
 the Forge) and the inference server is ready for
 [`allora-offchain-node`](https://github.com/allora-network/allora-offchain-node)
 (see `allora/config.example.json`). Local equivalents: `make train`, `make serve`,
-`make test`. For ETH, run a second stack with `ALLORA_SYMBOL=ETH/USDT`.
+`make test`. The BTC model also uses **cross-asset ETH features** (the server
+fetches both); for the ETH topic, run a second stack with `ALLORA_SYMBOL=ETH/USDT`
+and `ALLORA_CROSS_SYMBOL=BTC/USDT`.
 
 ## Reference: one-shot 24h pipeline
 

@@ -1,54 +1,59 @@
 """Package a trained model into a self-contained ``predict.pkl``.
 
-The exported callable runs the EXACT same ``add_features`` pipeline, takes the
-latest engineered row, and returns one float (the 24h log-return prediction).
+The exported callable runs the EXACT same feature pipeline, takes the latest
+engineered row, and returns one float (the 1h log-return prediction). When the
+model uses cross-asset features it accepts a reference DataFrame too:
+``predict(df, ref_df)``.
 
-We register :mod:`forge.features` for pickle-by-value so the feature code travels
-*inside* predict.pkl. The artifact then reloads with plain ``pickle.load`` in any
-environment that has numpy/pandas + the model's library (scikit-learn or
-lightgbm) -- no need for the ``forge`` package to be importable there.
+We register :mod:`forge.features` for pickle-by-value so all feature code travels
+inside predict.pkl; it reloads with plain ``pickle.load`` given numpy/pandas +
+the model's library.
 """
 from __future__ import annotations
 
 import pickle
 
 from . import features
-from .features import add_features
+from .features import build_features
 
 
-def make_predict(model, feature_cols, scale: float = 1.0):
-    """Build the single callable the Forge / worker node expects.
+def make_predict(model, feature_cols, scale: float = 1.0, cross_prefix=None):
+    """Build the single callable the worker node / Forge expects."""
 
-    ``scale`` is the variance-calibration factor applied to the raw model output
-    so predictions have realistic magnitude (log-aspect-ratio criterion)."""
-
-    def predict(df):
+    def predict(df, ref_df=None):
         import pandas as pd  # noqa: F401 -- self-sufficient at inference time
 
-        d = df.copy()
-        # Ensure a DatetimeIndex (add_features uses index.hour).
-        if not isinstance(d.index, pd.DatetimeIndex):
+        def _dtindex(x):
+            if isinstance(x.index, pd.DatetimeIndex):
+                return x
             for col in ("date", "timestamp"):
-                if col in d.columns:
+                if col in x.columns:
                     unit = "ms" if col == "timestamp" else None
-                    d = d.set_index(pd.to_datetime(d[col], unit=unit))
-                    break
-        feats = add_features(d)
+                    return x.set_index(pd.to_datetime(x[col], unit=unit))
+            return x
+
+        d = _dtindex(df.copy())
+        r = _dtindex(ref_df.copy()) if ref_df is not None else None
+        if cross_prefix and r is None:
+            raise ValueError("this model needs a reference asset; call predict(df, ref_df)")
+
+        feats = build_features(d, ref_df=r, cross_prefix=cross_prefix)
         if len(feats) == 0:
             raise ValueError("Not enough candle history to compute features "
-                             "(need ~50+ candles).")
+                             "(need ~300+ candles).")
         return float(model.predict(feats[feature_cols].iloc[[-1]])[0] * scale)
 
     return predict
 
 
-def export_predict(model, feature_cols, out_path: str, scale: float = 1.0) -> str:
+def export_predict(model, feature_cols, out_path: str, scale: float = 1.0,
+                   cross_prefix=None) -> str:
     """Cloudpickle the predict callable to ``out_path`` (feature code by value)."""
     import cloudpickle
 
     cloudpickle.register_pickle_by_value(features)
     try:
-        predict = make_predict(model, feature_cols, scale=scale)
+        predict = make_predict(model, feature_cols, scale=scale, cross_prefix=cross_prefix)
         with open(out_path, "wb") as f:
             cloudpickle.dump(predict, f)
     finally:

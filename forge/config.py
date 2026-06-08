@@ -16,6 +16,7 @@ class Config:
     # --- market / task ---
     exchange: str = "binanceus"
     symbol: str = "BTC/USDT"          # competition asset (BTC/USD); USDT pair is the liquid proxy
+    cross_symbol: str = "ETH/USDT"    # reference asset for cross-asset features ("" disables)
     timeframe: str = "5m"             # base candle resolution (matches 5-min poll cadence)
     horizon_steps: int = 12           # bars ahead = 1 hour at 5m (12 * 5m)
 
@@ -69,9 +70,18 @@ class Config:
         sym = self.symbol.replace("/", "")
         return f"ohlcv_{sym}_{self.timeframe}.csv"
 
+    def data_path_for(self, symbol: str) -> str:
+        sym = symbol.replace("/", "")
+        return os.path.join(self.data_dir, f"ohlcv_{sym}_{self.timeframe}.csv")
+
     @property
     def data_path(self) -> str:
-        return os.path.join(self.data_dir, self.data_file)
+        return self.data_path_for(self.symbol)
+
+    @property
+    def cross_prefix(self) -> str | None:
+        """Short name for the reference asset (e.g. 'eth'), or None if disabled."""
+        return self.cross_symbol.split("/")[0].lower() if self.cross_symbol else None
 
     @property
     def current_dir(self) -> str:
@@ -114,6 +124,7 @@ class Config:
         c = cls()
         c.exchange = os.environ.get("ALLORA_EXCHANGE", c.exchange)
         c.symbol = os.environ.get("ALLORA_SYMBOL", c.symbol)
+        c.cross_symbol = os.environ.get("ALLORA_CROSS_SYMBOL", c.cross_symbol)
         c.timeframe = os.environ.get("ALLORA_TIMEFRAME", c.timeframe)
         c.horizon_steps = int(os.environ.get("ALLORA_HORIZON_STEPS", c.horizon_steps))
         c.train_window_days = int(os.environ.get("ALLORA_TRAIN_WINDOW_DAYS", c.train_window_days))

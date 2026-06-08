@@ -13,9 +13,9 @@ import shutil
 import time
 from datetime import datetime, timedelta, timezone
 
-from . import data, evaluate, export, monitor, registry, train
+from . import data, evaluate, export, features, monitor, registry, train
 from .config import Config
-from .features import add_features
+from .features import build_features
 
 log = logging.getLogger("forge.pipeline")
 
@@ -31,13 +31,19 @@ def run_once(config: Config, fetcher=None) -> dict:
     """Run one full retrain/calibrate/gate/export cycle."""
     config.ensure_dirs()
 
-    # 1. Ingest fresh data and apply the rolling training window.
-    full = data.update_data(config, fetcher=fetcher)
-    df = data.window(full, config.train_window_days)
+    # 1. Ingest fresh data (primary + optional cross-asset) and window it.
+    cross_prefix = config.cross_prefix
+    df = data.window(data.update_data(config, config.symbol, fetcher=fetcher),
+                     config.train_window_days)
+    ref_df = None
+    if cross_prefix:
+        ref_df = data.window(data.update_data(config, config.cross_symbol, fetcher=fetcher),
+                             config.train_window_days)
 
-    # 2. Features + 1h-ahead target (horizon_steps bars).
-    feats = add_features(df)
-    X, y = train.build_target(feats, config.horizon_steps)
+    # 2. Features (single-asset + optional cross-asset) + 1h-ahead target.
+    feature_cols = features.active_feature_cols(cross_prefix)
+    feats = build_features(df, ref_df=ref_df, cross_prefix=cross_prefix)
+    X, y = train.build_target(feats, config.horizon_steps, feature_cols)
     if len(X) < config.min_train_rows:
         raise RuntimeError(f"insufficient data: {len(X)} rows < "
                            f"min_train_rows={config.min_train_rows}")
@@ -78,8 +84,8 @@ def run_once(config: Config, fetcher=None) -> dict:
     os.makedirs(vdir, exist_ok=True)
     final_model = train.fit_final(win_name, win["params"], X, y, config)
     scale = train.calibration_scale(y.values, final_model.predict(X), win["ratio"])
-    export.export_predict(final_model, list(X.columns),
-                          os.path.join(vdir, "predict.pkl"), scale=scale)
+    export.export_predict(final_model, list(X.columns), os.path.join(vdir, "predict.pkl"),
+                          scale=scale, cross_prefix=cross_prefix)
 
     wl = evaluate.whitelist_report(win["metrics"])
     log.info("winner=%s ratio=%.2f scale=%.3f whitelist=%d/%d",
@@ -100,10 +106,12 @@ def run_once(config: Config, fetcher=None) -> dict:
         "n_train_rows": len(X_tr),
         "n_val_rows": len(X_val),
         "feature_cols": list(X.columns),
+        "n_features": len(feature_cols),
         "timeframe": config.timeframe,
         "horizon_steps": config.horizon_steps,
         "horizon_minutes": config.horizon_minutes,
         "symbol": config.symbol,
+        "cross_symbol": config.cross_symbol if cross_prefix else "",
     }
     registry.save_metadata(config, version, metadata)
 

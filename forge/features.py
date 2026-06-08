@@ -29,7 +29,74 @@ FEATURE_COLS = [
     "hour_sin", "hour_cos", "minute_sin", "minute_cos", "dow_sin", "dow_cos",
 ]
 
+CROSS_FEATURE_COLS = [
+    "{p}_log_return", "{p}_ret_12", "{p}_ret_24", "{p}_volatility_24",
+    "{p}_return_lag_1", "{p}_return_lag_2", "{p}_return_lag_3",
+    "ret_spread_1", "ret_spread_12", "x_corr_48", "x_beta_48",
+]
+
 EPS = 1e-12
+
+
+def cross_feature_cols(prefix: str) -> list:
+    """Cross-asset feature column names for a given reference prefix (e.g. 'eth')."""
+    return [c.format(p=prefix) for c in CROSS_FEATURE_COLS]
+
+
+def active_feature_cols(cross_prefix=None) -> list:
+    """Full ordered feature list the model trains/predicts on."""
+    cols = list(FEATURE_COLS)
+    if cross_prefix:
+        cols += cross_feature_cols(cross_prefix)
+    return cols
+
+
+def build_features(df, ref_df=None, cross_prefix=None):
+    """Primary single-asset features, optionally joined with cross-asset features
+    computed from a reference asset (``ref_df``). Single source of truth used by
+    both training and inference."""
+    feats = add_features(df)
+    if ref_df is not None and cross_prefix:
+        feats = add_cross_features(feats, ref_df, prefix=cross_prefix)
+    return feats
+
+
+def add_cross_features(primary_feats, ref_df, prefix="eth"):
+    """Add reference-asset (e.g. ETH) features + cross interactions to the primary
+    (e.g. BTC) feature frame. Captures lead-lag, relative strength, rolling
+    correlation and beta -- strong signals between correlated crypto majors."""
+    import numpy as np
+    import pandas as pd
+
+    r = ref_df.copy()
+    if not isinstance(r.index, pd.DatetimeIndex):
+        for col in ("date", "timestamp"):
+            if col in r.columns:
+                unit = "ms" if col == "timestamp" else None
+                r = r.set_index(pd.to_datetime(r[col], unit=unit))
+                break
+    rc = r["close"]
+    ref_lr = np.log(rc / rc.shift(1))
+
+    ref = pd.DataFrame(index=r.index)
+    ref[f"{prefix}_log_return"] = ref_lr
+    ref[f"{prefix}_ret_12"] = np.log(rc / rc.shift(12))
+    ref[f"{prefix}_ret_24"] = np.log(rc / rc.shift(24))
+    ref[f"{prefix}_volatility_24"] = ref_lr.rolling(24).std()
+    for lag in (1, 2, 3):
+        ref[f"{prefix}_return_lag_{lag}"] = ref_lr.shift(lag)
+
+    out = primary_feats.join(ref.reindex(primary_feats.index))
+
+    # cross interactions (primary returns vs reference returns)
+    b_lr, x_lr = out["log_return"], out[f"{prefix}_log_return"]
+    out["ret_spread_1"] = b_lr - x_lr
+    out["ret_spread_12"] = out["ret_12"] - out[f"{prefix}_ret_12"]
+    out["x_corr_48"] = b_lr.rolling(48).corr(x_lr)
+    out["x_beta_48"] = b_lr.rolling(48).cov(x_lr) / (x_lr.rolling(48).var() + EPS)
+
+    out.dropna(inplace=True)
+    return out
 
 
 def add_features(df):

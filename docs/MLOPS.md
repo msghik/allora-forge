@@ -53,8 +53,8 @@ competition's own metrics, and serves inferences to an Allora worker node.
 | Module | Responsibility |
 |--------|----------------|
 | `config.py` | Typed `Config`: `timeframe=5m`, `horizon_steps=12`, rolling window, calibration grid, model params, paths; env overrides. |
-| `data.py` | Incremental 5m OHLCV ingest, dedup/gap checks, per-symbol CSV store, recent-candle fetch (store fallback). |
-| `features.py` | Canonical pure-pandas `add_features` + `FEATURE_COLS` — ~37 scale-free features: multi-scale momentum & volatility (incl. Parkinson, vol-regime), trend/MA distance, MACD, ADX, RSI/Stoch/Williams/CCI/MFI, Bollinger, volume z-score, order-flow imbalance, candle-shape microstructure, cyclical time. |
+| `data.py` | Per-symbol incremental 5m OHLCV ingest (BTC **and** the cross asset), dedup/gap checks, CSV store, recent-candle fetch (store fallback). |
+| `features.py` | Canonical pure-pandas `add_features` (~37 single-asset features) **+ `add_cross_features`** (~11 cross-asset: ETH momentum/vol/lags, return spread, rolling correlation & beta) → 48 total via `build_features`. All scale-free. |
 | `train.py` | 1h target, chronological split, regularized Ridge (TS-CV α) + LightGBM (early stopping), **variance-calibration** factor. |
 | `evaluate.py` | Competition metrics (ZPTAE surrogate, WRMSE, DA + Wilson CI + binomial p, Pearson + p, log-aspect) on non-overlapping windows + whitelist pass/fail. |
 | `registry.py` | Versioned store, **promotion gate** (whitelist-criteria-passed → ZPTAE tiebreak, Pearson floor, no-regression), rollback, metrics log. |
@@ -89,20 +89,23 @@ First boot trains immediately (cold-start fetch of ~120 days of 5m candles), the
 - **Alerts:** set `ALLORA_ALERT_WEBHOOK` for training failures / rejected (regressing) candidates.
 
 ## Improving DA (the real alpha)
-The model already uses ~37 scale-free single-asset features (multi-scale momentum
-& volatility, trend, oscillators, volume/order-flow, candle-shape microstructure,
-regime, cyclical time), a per-cycle calibration search, and whitelist-aware
-selection. Clearing `DA > 0.55` on 1h crypto is still hard — remaining levers,
-roughly by expected impact:
-- **Cross-asset BTC↔ETH** lead-lag (needs the server to fetch both assets and pass
-  combined inputs — breaks the single-DataFrame `predict` contract, so it lives in
-  the serving layer rather than the portable predict.pkl).
+The model uses ~48 scale-free features (single-asset multi-scale momentum/vol,
+trend, oscillators, volume/order-flow, microstructure, regime, cyclical time
+**plus cross-asset ETH↔BTC** lead-lag/spread/correlation/beta), a per-cycle
+calibration search, and whitelist-aware selection. The cross-asset model needs
+both assets at inference, so `predict(df, ref_df)` takes a reference DataFrame and
+the **server fetches both** (controlled by `cross_symbol`); `predict.pkl` stays
+self-contained. Clearing `DA > 0.55` on 1h crypto is still hard — remaining
+levers, roughly by expected impact:
 - **Alt-data**: order-book imbalance/depth, funding/open-interest, on-chain (gas,
   active addresses) — the data sources the rules suggest.
 - **ZPTAE-direct training** (custom objective) and **model ensembling**.
+- **More history** (`ALLORA_TRAIN_WINDOW_DAYS=365`) to tighten the DA CI.
 
-The framework scores all 8 criteria per cycle, so iterate against the exact
-scoreboard (`models/metrics.jsonl`).
+> Note: WRMSE/WZPTAE-improvement-over-zero are effectively unreachable at realistic
+> r (~0.1) — they'd need r≈0.4+. Target the **DA cluster + Pearson + log-aspect**
+> (six achievable criteria); the framework scores all eight per cycle in
+> `models/metrics.jsonl`.
 
 ## Local (no Docker)
 ```bash

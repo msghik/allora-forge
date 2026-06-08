@@ -7,12 +7,13 @@ import numpy as np
 from .features import FEATURE_COLS
 
 
-def build_target(df_features, horizon: int):
+def build_target(df_features, horizon: int, feature_cols=None):
     r"""target_t = ln(Close_{t+H} / Close_t); drop the H trailing NaN rows."""
+    feature_cols = feature_cols or FEATURE_COLS
     data = df_features.copy()
     data["target"] = np.log(data["close"].shift(-horizon) / data["close"])
     data = data.dropna(subset=["target"])
-    return data[FEATURE_COLS].copy(), data["target"].copy()
+    return data[feature_cols].copy(), data["target"].copy()
 
 
 def chrono_split(X, y, val_fraction: float):
