@@ -47,8 +47,8 @@ class Config:
     ensemble_weights: tuple = (0.35, 0.5, 0.65)  # blend mix grid (regressor weight)
     ridge_alphas: tuple = (0.1, 1.0, 10.0, 30.0, 100.0, 300.0, 1000.0)
     lgbm_params: dict = field(default_factory=lambda: dict(
-        n_estimators=2000, learning_rate=0.03, num_leaves=31, max_depth=4,
-        min_child_samples=200, subsample=0.8, subsample_freq=1,
+        n_estimators=2000, learning_rate=0.02, num_leaves=31, max_depth=3,
+        min_child_samples=400, subsample=0.8, subsample_freq=1,
         colsample_bytree=0.8, reg_alpha=0.5, reg_lambda=1.0, verbose=-1,
     ))
 
