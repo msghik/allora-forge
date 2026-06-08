@@ -54,12 +54,13 @@ competition's own metrics, and serves inferences to an Allora worker node.
 |--------|----------------|
 | `config.py` | Typed `Config`: `timeframe=5m`, `horizon_steps=12`, rolling window, calibration grid, model params, **alt-data + sign-aware flags**, paths; env overrides. |
 | `data.py` | Per-symbol incremental 5m ingest with **order-flow columns** (taker-buy volume / trades / quote volume from raw klines) for BTC **and** the cross asset, **plus a futures store** (funding rate + open interest); dedup/gap checks, CSV stores, recent-candle/futures fetch (store fallback). |
-| `features.py` | Canonical pure-pandas `add_features` (~37 single-asset) **+ order-flow** (CVD/OFI/taker-buy/trade-intensity) **+ `add_cross_features`** (ETH lead-lag/spread/corr/beta) **+ `add_futures_features`** (funding z/carry, OI change & price divergence) → up to **60** features via `build_features`. All scale-free; optional blocks degrade to neutral if a source is missing. |
+| `onchain.py` | **On-chain alt-data via Dune** (`stable_supply`, `cex_netflow`, `dex_volume`, `active_addr`): saved-query results → merged/persisted time series; best-effort (missing metrics neutral). |
+| `features.py` | Canonical pure-pandas `add_features` (~37 single-asset) **+ order-flow** (CVD/OFI/taker-buy/trade-intensity) **+ `add_cross_features`** (ETH lead-lag/spread/corr/beta) **+ `add_futures_features`** (funding z/carry, OI change & price divergence) **+ `add_onchain_features`** (stablecoin supply, CEX net-flow, DEX volume, activity) → up to **66** features via `build_features`. All scale-free; optional blocks degrade to neutral if a source is missing. |
 | `estimators.py` | `SignMagnitudePredictor` (classifier → signed return) and `BlendPredictor` (regressor × classifier) — uniform `.predict`, pickled by value. |
 | `train.py` | 1h target, **purged** chronological split, **recency-weighted** Ridge + LightGBM regressors **and a LightGBM directional classifier**, **variance-calibration** factor. |
 | `evaluate.py` | Competition metrics (ZPTAE surrogate, WRMSE, DA + Wilson CI + binomial p, Pearson + p, log-aspect) on non-overlapping windows + whitelist pass/fail. |
 | `registry.py` | Versioned store, **promotion gate** (whitelist-criteria-passed → ZPTAE tiebreak, Pearson floor, no-regression), rollback, metrics log. |
-| `export.py` | `predict(df, ref_df, fut_df)` closure with calibration `scale` + cloudpickle (feature **and** estimator code by value → portable predict.pkl). |
+| `export.py` | `predict(df, ref_df, fut_df, onchain_df)` closure with calibration `scale` + cloudpickle (feature **and** estimator code by value → portable predict.pkl). |
 | `pipeline.py` | Cycle (`--once`) / daily loop (`--loop`): trains regressor/classifier/blend candidates, per-candidate **calibration-ratio search** + **whitelist-aware** (DA-first) winner selection. |
 | `server.py` | FastAPI worker: `/inference/{token}`, `/health`, `/metadata`; fetches primary + cross + futures; hot-reloads on promotion. |
 | `monitor.py` | Live-prediction logging, reconciliation vs realized 1h returns, alerts. |
@@ -100,18 +101,20 @@ attacks DA on two fronts:
    that passes the **most whitelist criteria** (DA-first). Training is
    **recency-weighted** (exponential half-life) to track the current regime and
    uses a **purged** train/val boundary so the last targets don't leak.
-2. **Genuinely new information.** Up to **60 scale-free features**: single-asset
+2. **Genuinely new information.** Up to **66 scale-free features**: single-asset
    momentum/vol/trend/oscillators/microstructure/regime/time, **cross-asset
    ETH↔BTC** lead-lag/spread/corr/beta, **real order flow** (taker-buy volume →
    CVD / order-flow imbalance / trade intensity, pulled from raw klines — the
-   signal ccxt's normalized OHLCV throws away), and **futures positioning**
-   (funding-rate carry/z-score, open-interest change & price divergence).
+   signal ccxt's normalized OHLCV throws away), **futures positioning**
+   (funding-rate carry/z-score, open-interest change & price divergence), and
+   **on-chain** (stablecoin supply, CEX net-flow, DEX volume, activity via Dune —
+   see [docs/ONCHAIN.md](ONCHAIN.md)).
 
-The model can need all three inputs at inference, so `predict(df, ref_df, fut_df)`
-takes the reference asset and a futures frame, and the **server fetches all of
-them** (controlled by `cross_symbol` / `futures_symbol`). Missing alt-data
-degrades to neutral features rather than failing, and `predict.pkl` stays
-self-contained (feature + estimator code travel by value).
+The model can need all inputs at inference, so `predict(df, ref_df, fut_df,
+onchain_df)` takes the reference asset, a futures frame and an on-chain frame, and
+the **server fetches all of them** (controlled by `cross_symbol` / `futures_symbol`
+/ Dune config). Missing alt-data degrades to neutral features rather than failing,
+and `predict.pkl` stays self-contained (feature + estimator code travel by value).
 
 > **A note on honest sample size.** `DA ci_lo > 0.52` punishes small samples: a
 > flattering DA on a few hundred non-overlapping windows (`±0.04` CI) is not the

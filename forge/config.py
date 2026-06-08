@@ -29,6 +29,11 @@ class Config:
     use_orderflow: bool = True        # taker-buy volume / CVD / trade-intensity features (raw klines)
     futures_exchange: str = "binance"  # where to pull funding/OI (binanceus has no futures)
     futures_symbol: str = "BTC/USDT:USDT"  # perpetual swap symbol ("" disables futures features)
+    # On-chain via Dune Analytics: one saved query per canonical metric returning
+    # (ts, value). Enabled when an API key + at least one query id are set.
+    dune_api_key: str = ""
+    dune_execute: bool = False        # re-run queries (costs credits) vs fetch last cached results
+    dune_queries: dict = field(default_factory=dict)  # metric -> Dune query id
 
     # --- training ---
     train_window_days: int = 180      # rolling window of 5m bars (~52k rows)
@@ -94,6 +99,10 @@ class Config:
         return os.path.join(self.data_dir, f"futures_{sym}.csv")
 
     @property
+    def onchain_path(self) -> str:
+        return os.path.join(self.data_dir, "onchain.csv")
+
+    @property
     def data_path(self) -> str:
         return self.data_path_for(self.symbol)
 
@@ -105,6 +114,10 @@ class Config:
     @property
     def use_futures(self) -> bool:
         return bool(self.futures_symbol)
+
+    @property
+    def use_onchain(self) -> bool:
+        return bool(self.dune_api_key and self.dune_queries)
 
     @property
     def purge(self) -> int:
@@ -165,6 +178,16 @@ class Config:
         c.use_orderflow = cls._flag("ALLORA_USE_ORDERFLOW", c.use_orderflow)
         c.futures_exchange = os.environ.get("ALLORA_FUTURES_EXCHANGE", c.futures_exchange)
         c.futures_symbol = os.environ.get("ALLORA_FUTURES_SYMBOL", c.futures_symbol)
+        c.dune_api_key = os.environ.get("ALLORA_DUNE_API_KEY", c.dune_api_key)
+        c.dune_execute = cls._flag("ALLORA_DUNE_EXECUTE", c.dune_execute)
+        c.dune_queries = {
+            metric: os.environ[env].strip()
+            for metric, env in (("stable_supply", "ALLORA_DUNE_QUERY_STABLE_SUPPLY"),
+                                ("cex_netflow", "ALLORA_DUNE_QUERY_CEX_NETFLOW"),
+                                ("dex_volume", "ALLORA_DUNE_QUERY_DEX_VOLUME"),
+                                ("active_addr", "ALLORA_DUNE_QUERY_ACTIVE_ADDR"))
+            if os.environ.get(env, "").strip()
+        }
         c.train_window_days = int(os.environ.get("ALLORA_TRAIN_WINDOW_DAYS", c.train_window_days))
         c.recency_half_life_days = float(
             os.environ.get("ALLORA_RECENCY_HALF_LIFE_DAYS", c.recency_half_life_days))

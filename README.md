@@ -30,16 +30,18 @@ the Forge) and the inference server is ready for
 
 Because the whitelist is **directional-accuracy heavy**, the worker trains
 **sign-aware** candidates (a directional LightGBM classifier + regressor×classifier
-blends, recency-weighted with a purged split) and feeds them up to **60 scale-free
+blends, recency-weighted with a purged split) and feeds them up to **66 scale-free
 features**: single-asset technicals, **cross-asset ETH↔BTC** lead-lag, **real order
-flow** (taker-buy volume / CVD from raw klines), and **futures positioning**
-(funding rate + open interest). The model therefore takes
-`predict(df, ref_df, fut_df)` and the **server fetches all three** (controlled by
-`cross_symbol` / `futures_symbol`); missing alt-data degrades to neutral and
-`predict.pkl` stays self-contained. Order flow + futures need a binance-family /
-futures-enabled exchange (set `ALLORA_EXCHANGE=binance` / `ALLORA_FUTURES_EXCHANGE`
-outside the US). For the ETH topic, run a second stack with `ALLORA_SYMBOL=ETH/USDT`,
-`ALLORA_CROSS_SYMBOL=BTC/USDT`, `ALLORA_FUTURES_SYMBOL=ETH/USDT:USDT`.
+flow** (taker-buy volume / CVD from raw klines), **futures positioning** (funding
+rate + open interest), and **on-chain** (stablecoin supply, CEX net-flow, DEX
+volume, activity via Dune — see [docs/ONCHAIN.md](docs/ONCHAIN.md)). The model
+therefore takes `predict(df, ref_df, fut_df, onchain_df)` and the **server fetches
+all of them** (controlled by `cross_symbol` / `futures_symbol` / Dune config);
+missing alt-data degrades to neutral and `predict.pkl` stays self-contained. Order
+flow + futures need a binance-family / futures-enabled exchange (set
+`ALLORA_EXCHANGE=binance` / `ALLORA_FUTURES_EXCHANGE` outside the US). For the ETH
+topic, run a second stack with `ALLORA_SYMBOL=ETH/USDT`, `ALLORA_CROSS_SYMBOL=BTC/USDT`,
+`ALLORA_FUTURES_SYMBOL=ETH/USDT:USDT`.
 
 ## Reference: one-shot 24h pipeline
 

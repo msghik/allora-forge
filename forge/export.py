@@ -21,10 +21,11 @@ from .features import build_features
 
 
 def make_predict(model, feature_cols, scale: float = 1.0, cross_prefix=None,
-                 use_orderflow: bool = False, use_futures: bool = False):
+                 use_orderflow: bool = False, use_futures: bool = False,
+                 use_onchain: bool = False):
     """Build the single callable the worker node / Forge expects."""
 
-    def predict(df, ref_df=None, fut_df=None):
+    def predict(df, ref_df=None, fut_df=None, onchain_df=None):
         import pandas as pd  # noqa: F401 -- self-sufficient at inference time
 
         def _dtindex(x):
@@ -39,11 +40,13 @@ def make_predict(model, feature_cols, scale: float = 1.0, cross_prefix=None,
         d = _dtindex(df.copy())
         r = _dtindex(ref_df.copy()) if ref_df is not None else None
         f = _dtindex(fut_df.copy()) if fut_df is not None else None
+        oc = _dtindex(onchain_df.copy()) if onchain_df is not None else None
         if cross_prefix and r is None:
             raise ValueError("this model needs a reference asset; call predict(df, ref_df)")
 
-        feats = build_features(d, ref_df=r, cross_prefix=cross_prefix, fut_df=f,
-                               use_orderflow=use_orderflow, use_futures=use_futures)
+        feats = build_features(d, ref_df=r, cross_prefix=cross_prefix, fut_df=f, onchain_df=oc,
+                               use_orderflow=use_orderflow, use_futures=use_futures,
+                               use_onchain=use_onchain)
         if len(feats) == 0:
             raise ValueError("Not enough candle history to compute features "
                              "(need ~300+ candles).")
@@ -54,7 +57,7 @@ def make_predict(model, feature_cols, scale: float = 1.0, cross_prefix=None,
 
 def export_predict(model, feature_cols, out_path: str, scale: float = 1.0,
                    cross_prefix=None, use_orderflow: bool = False,
-                   use_futures: bool = False) -> str:
+                   use_futures: bool = False, use_onchain: bool = False) -> str:
     """Cloudpickle the predict callable to ``out_path`` (feature/model code by value)."""
     import cloudpickle
 
@@ -62,7 +65,8 @@ def export_predict(model, feature_cols, out_path: str, scale: float = 1.0,
     cloudpickle.register_pickle_by_value(estimators)
     try:
         predict = make_predict(model, feature_cols, scale=scale, cross_prefix=cross_prefix,
-                               use_orderflow=use_orderflow, use_futures=use_futures)
+                               use_orderflow=use_orderflow, use_futures=use_futures,
+                               use_onchain=use_onchain)
         with open(out_path, "wb") as f:
             cloudpickle.dump(predict, f)
     finally:

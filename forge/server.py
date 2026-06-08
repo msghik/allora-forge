@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
-from . import data, export, monitor, registry
+from . import data, export, monitor, onchain, registry
 from .config import Config
 
 log = logging.getLogger("forge.server")
@@ -98,7 +98,10 @@ def inference(token: str):
         fut_df = None
         if fut_sym:  # futures model: fetch funding/OI (degrades to neutral if empty)
             fut_df = data.get_recent_futures(config, fut_sym)
-        value = _predict(df, ref_df, fut_df)
+        onchain_df = None
+        if meta.get("use_onchain"):  # on-chain model: fetch Dune metrics (neutral if empty)
+            onchain_df = onchain.get_recent_onchain(config)
+        value = _predict(df, ref_df, fut_df, onchain_df)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001

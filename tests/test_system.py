@@ -94,6 +94,30 @@ def test_futures_features_neutral_and_real():
     assert float(real["oi_change_12"].abs().sum()) > 0.0
 
 
+def test_onchain_features_neutral_and_real():
+    base = features.build_features(_DATA["BTC/USDT"].iloc[:4000], use_orderflow=True)
+    # neutral: no on-chain frame -> columns present, all zero, no NaN
+    neutral = features.add_onchain_features(base, None)
+    for col in features.ONCHAIN_COLS:
+        assert col in neutral.columns
+    assert not neutral[features.ONCHAIN_COLS].isna().any().any()
+    assert float(neutral[features.ONCHAIN_COLS].abs().sum().sum()) == 0.0
+
+    # real: a synthetic Dune frame (hourly) produces non-trivial features
+    hidx = pd.date_range(base.index[0], base.index[-1], freq="1h")
+    rng = np.random.default_rng(3)
+    src = pd.DataFrame({
+        "stable_supply": 1e11 + np.cumsum(rng.normal(0, 1e7, len(hidx))),
+        "cex_netflow": rng.normal(0, 500, len(hidx)),
+        "dex_volume": np.abs(rng.normal(1e8, 2e7, len(hidx))),
+        "active_addr": np.abs(rng.normal(9e5, 5e4, len(hidx))),
+    }, index=hidx).rename_axis("ts")
+    real = features.add_onchain_features(base, src)
+    assert not real[features.ONCHAIN_COLS].isna().any().any()
+    assert float(real["stable_supply_chg24"].abs().sum()) > 0.0
+    assert float(real["cex_netflow_z"].abs().sum()) > 0.0
+
+
 def test_core_ohlcv_fallback_no_row_wipe():
     """Regression: when raw klines fall back to core OHLCV the order-flow columns
     are all-NaN; they must NOT wipe every row via a blanket dropna (the live

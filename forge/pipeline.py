@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from . import data, estimators, evaluate, export, features, monitor, registry, train
+from . import data, estimators, evaluate, export, features, monitor, onchain, registry, train
 from .config import Config
 from .features import build_features
 
@@ -83,11 +83,11 @@ def _refit_winner(win, params, X, y, config):
     return estimators.BlendPredictor(lgbm, clf, win["weight"], reg_std, sgn_std)
 
 
-def run_once(config: Config, fetcher=None, futures_fetcher=None) -> dict:
+def run_once(config: Config, fetcher=None, futures_fetcher=None, onchain_fetcher=None) -> dict:
     """Run one full retrain/calibrate/gate/export cycle."""
     config.ensure_dirs()
 
-    # 1. Ingest fresh data (primary + optional cross-asset + optional futures).
+    # 1. Ingest fresh data (primary + optional cross-asset + futures + on-chain).
     cross_prefix = config.cross_prefix
     df = data.window(data.update_data(config, config.symbol, fetcher=fetcher),
                      config.train_window_days)
@@ -98,12 +98,16 @@ def run_once(config: Config, fetcher=None, futures_fetcher=None) -> dict:
     fut_df = None
     if config.use_futures:
         fut_df = data.update_futures(config, config.futures_symbol, fetcher=futures_fetcher)
+    onchain_df = None
+    if config.use_onchain:
+        onchain_df = onchain.update_onchain(config, fetcher=onchain_fetcher)
 
     # 2. Features (all enabled blocks) + 1h-ahead target.
     feature_cols = features.active_feature_cols(cross_prefix, config.use_orderflow,
-                                                config.use_futures)
+                                                config.use_futures, config.use_onchain)
     feats = build_features(df, ref_df=ref_df, cross_prefix=cross_prefix, fut_df=fut_df,
-                           use_orderflow=config.use_orderflow, use_futures=config.use_futures)
+                           onchain_df=onchain_df, use_orderflow=config.use_orderflow,
+                           use_futures=config.use_futures, use_onchain=config.use_onchain)
     X, y = train.build_target(feats, config.horizon_steps, feature_cols)
     if len(X) < config.min_train_rows:
         raise RuntimeError(f"insufficient data: {len(X)} rows < "
@@ -144,7 +148,8 @@ def run_once(config: Config, fetcher=None, futures_fetcher=None) -> dict:
     scale = train.calibration_scale(y.values, final_model.predict(X), win["ratio"])
     export.export_predict(final_model, list(X.columns), os.path.join(vdir, "predict.pkl"),
                           scale=scale, cross_prefix=cross_prefix,
-                          use_orderflow=config.use_orderflow, use_futures=config.use_futures)
+                          use_orderflow=config.use_orderflow, use_futures=config.use_futures,
+                          use_onchain=config.use_onchain)
 
     wl = evaluate.whitelist_report(win["metrics"])
     log.info("winner=%s ratio=%.2f scale=%.3f whitelist=%d/%d",
@@ -174,6 +179,8 @@ def run_once(config: Config, fetcher=None, futures_fetcher=None) -> dict:
         "use_orderflow": config.use_orderflow,
         "use_futures": config.use_futures,
         "futures_symbol": config.futures_symbol if config.use_futures else "",
+        "use_onchain": config.use_onchain,
+        "onchain_metrics": sorted(config.dune_queries) if config.use_onchain else [],
         "recency_half_life_days": config.recency_half_life_days,
         "purge_steps": config.purge,
     }

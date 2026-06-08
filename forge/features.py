@@ -55,6 +55,13 @@ FUTURES_COLS = [
     "oi_change_12", "oi_change_48", "oi_price_div_12",
 ]
 
+# On-chain features (Dune): stablecoin supply, CEX net-flow, DEX volume, activity.
+ONCHAIN_COLS = [
+    "stable_supply_chg24", "stable_supply_z",
+    "cex_netflow_z", "cex_netflow_sum24_z",
+    "dex_vol_z", "active_addr_z",
+]
+
 EPS = 1e-12
 
 
@@ -64,7 +71,7 @@ def cross_feature_cols(prefix: str) -> list:
 
 
 def active_feature_cols(cross_prefix=None, use_orderflow: bool = False,
-                        use_futures: bool = False) -> list:
+                        use_futures: bool = False, use_onchain: bool = False) -> list:
     """Full ordered feature list the model trains/predicts on (config-determined)."""
     cols = list(FEATURE_COLS)
     if use_orderflow:
@@ -73,21 +80,27 @@ def active_feature_cols(cross_prefix=None, use_orderflow: bool = False,
         cols += cross_feature_cols(cross_prefix)
     if use_futures:
         cols += list(FUTURES_COLS)
+    if use_onchain:
+        cols += list(ONCHAIN_COLS)
     return cols
 
 
-def build_features(df, ref_df=None, cross_prefix=None, fut_df=None,
-                   use_orderflow: bool = False, use_futures: bool = False):
+def build_features(df, ref_df=None, cross_prefix=None, fut_df=None, onchain_df=None,
+                   use_orderflow: bool = False, use_futures: bool = False,
+                   use_onchain: bool = False):
     """Single source of truth used by both training and inference.
 
     Primary single-asset features (+ optional order flow), optionally joined with
-    cross-asset features from ``ref_df`` and futures features from ``fut_df``.
+    cross-asset features (``ref_df``), futures features (``fut_df``) and on-chain
+    features (``onchain_df``). Optional blocks degrade to neutral when absent.
     """
     feats = add_features(df, use_orderflow=use_orderflow)
     if ref_df is not None and cross_prefix:
         feats = add_cross_features(feats, ref_df, prefix=cross_prefix)
     if use_futures:
         feats = add_futures_features(feats, fut_df)
+    if use_onchain:
+        feats = add_onchain_features(feats, onchain_df)
     return feats
 
 
@@ -175,6 +188,50 @@ def add_futures_features(primary_feats, fut_df):
     out["oi_price_div_12"] = out["oi_change_12"] * np.sign(ret_12)
 
     out[FUTURES_COLS] = out[FUTURES_COLS].fillna(0.0)
+    return out
+
+
+def add_onchain_features(primary_feats, onchain_df):
+    """Add on-chain features (stablecoin supply, CEX net-flow, DEX volume, network
+    activity) from a Dune-sourced frame, reindexed/forward-filled onto the feature
+    index. Each metric is optional and degrades to neutral (no NaNs, no row drops)
+    so the worker keeps serving when on-chain data is unavailable."""
+    import numpy as np
+    import pandas as pd
+
+    out = primary_feats.copy()
+    idx = out.index
+    src = _dtindex(onchain_df.copy()) if (onchain_df is not None and not onchain_df.empty) \
+        else pd.DataFrame()
+
+    def metric(name):
+        if name in getattr(src, "columns", []):
+            s = src[name]
+            s = s[~s.index.duplicated(keep="last")].sort_index()
+            return s.reindex(idx.union(s.index)).sort_index().ffill().reindex(idx)
+        return pd.Series(np.nan, index=idx)
+
+    def z(s, n=288 * 7):
+        return (s - s.rolling(n, min_periods=24).mean()) / (s.rolling(n, min_periods=24).std() + EPS)
+
+    # stablecoin supply: 24h log change + z-score of its change (mint/burn pressure)
+    ss = metric("stable_supply")
+    log_ss = np.log(ss.where(ss > 0))
+    out["stable_supply_chg24"] = log_ss - log_ss.shift(288)
+    out["stable_supply_z"] = z(log_ss.diff())
+
+    # CEX net-flow (into exchanges = sell pressure): instantaneous z + 24h-sum z
+    nf = metric("cex_netflow")
+    out["cex_netflow_z"] = z(nf)
+    out["cex_netflow_sum24_z"] = z(nf.rolling(288, min_periods=24).sum())
+
+    # DEX volume + active addresses: log-z (risk-on / activity regime)
+    dv = metric("dex_volume")
+    out["dex_vol_z"] = z(np.log(dv.where(dv > 0)))
+    aa = metric("active_addr")
+    out["active_addr_z"] = z(np.log(aa.where(aa > 0)))
+
+    out[ONCHAIN_COLS] = out[ONCHAIN_COLS].fillna(0.0)
     return out
 
 
