@@ -85,11 +85,17 @@ python -m allora_forge_builder_kit.web_dashboard   # monitor on :8787
 ### Use your REGISTERED wallet (`allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt`)
 `deploy_worker.py` **auto-creates a new wallet** in `worker_keys/` by default. The
 competition scores the address you registered in the Forge, so do **one** of:
-- **Import your key first** so the worker uses it: add the mnemonic for `allo1uv65…`
-  to the kit's keyring / `worker_keys/` (e.g. `allorad keys add forge-worker
-  --recover`) and start it for that address — `WorkerManager().start_worker(
-  topic_id=72, address="allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt")`. **[verify]**
-  the exact import path in `deploy_worker.py`.
+- **Import your wallet first, then deploy** (verified API): register your existing
+  key, then re-run deploy — the kit picks the imported identity because it isn't yet
+  used for the topic:
+  ```python
+  from allora_forge_builder_kit import WorkerManager
+  wm = WorkerManager()
+  wm.ensure_identity(alias="forge",
+                     address="allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt",
+                     mnemonic="<YOUR SEED PHRASE>")   # never commit/share this
+  ```
+  then `TOPIC_ID=72 python deploy_worker.py` and confirm the printed address is yours.
 - **Or** let it create a wallet and **register THAT address** on the Forge instead.
 
 Either way, confirm the worker's submitting address matches what the Forge shows as
