@@ -1,5 +1,11 @@
 # Going live — deploy the worker & start the whitelist baseline
 
+> **For competition topic 72, the recommended path is now the Allora Forge Builder
+> Kit** — see **[FORGE_BUILDER_KIT.md](FORGE_BUILDER_KIT.md)**. It auto-handles the
+> wallet, faucet, worker process, evaluation, and submission windows. The
+> custom-stack + `allora-offchain-node` route below remains a valid alternative
+> (full control, daily retrain, our exact `predict.pkl`).
+
 The model is **ceilinged at DA ≈ 0.53** on this data class (see [MLOPS.md](MLOPS.md)),
 so whitelisting now hinges on what the rules actually reward: a **clear majority of
 the criteria integrated over a long baseline**, **liveness**, **statistical
