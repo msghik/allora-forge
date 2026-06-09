@@ -53,13 +53,8 @@ INTERVAL = "5m"
 NUMBER_OF_INPUT_BARS = 48
 TARGET_BARS = 12          # 12 * 5m = 1 hour ahead  <-- topic-72 horizon (topic_77 used 1)
 DAYS = 365                # history to train on
-VAL_FRACTION = 0.2
-
-# Regularized LightGBM (validated by walk-forward ablation/tuning on this task).
-LGBM_PARAMS = dict(n_estimators=600, learning_rate=0.02, max_depth=3,
-                   num_leaves=31, min_child_samples=400, subsample=0.8,
-                   subsample_freq=1, colsample_bytree=0.8, reg_alpha=0.5,
-                   reg_lambda=1.0, random_state=42, verbose=-1)
+# LightGBM capacity is tuned per-fold below (the kit builds ~240 features, so the
+# right depth/regularization differs from our ~54-feature stack).
 
 api_key = os.environ.get("ALLORA_API_KEY", "").strip()
 DATA_SOURCE = "allora" if api_key else "binance"
@@ -97,31 +92,57 @@ assert "target" in df.columns, "no 'target' column -- check the kit's dataframe 
 df = df.dropna(subset=feature_cols + ["target"]).reset_index(drop=True)
 print(f"[data] {len(df)} rows, {len(feature_cols)} features")
 
-# ---------------- 2. chronological split (purged) + train ----------------
-cut = int(len(df) * (1 - VAL_FRACTION))
-purge = TARGET_BARS               # don't let train targets overlap the holdout window
-X_tr, y_tr = df[feature_cols].iloc[:max(1, cut - purge)], df["target"].iloc[:max(1, cut - purge)]
-X_va, y_va = df[feature_cols].iloc[cut:], df["target"].iloc[cut:]
-model = LGBMRegressor(**LGBM_PARAMS).fit(X_tr, y_tr)
+# ---------------- 2. tune over walk-forward folds (the kit builds ~240 features,
+#                     so let the data pick the LightGBM capacity, judged on DA) ----
+BASE = dict(n_estimators=600, learning_rate=0.03, subsample=0.8, subsample_freq=1,
+            colsample_bytree=0.8, reg_alpha=0.5, reg_lambda=1.0,
+            random_state=42, verbose=-1)
+GRID = [dict(max_depth=d, num_leaves=nl, min_child_samples=mc)
+        for d, nl in ((4, 31), (6, 63), (8, 127)) for mc in (100, 300)]
+N_FOLDS = 4
+X_all, y_all = df[feature_cols], df["target"]
+n = len(df)
+val_len = n // (2 * N_FOLDS)
+folds = [(n - (N_FOLDS - i) * val_len, n - (N_FOLDS - 1 - i) * val_len) for i in range(N_FOLDS)]
 
-# ---------------- 3. holdout metrics + least-squares shrink ----------------
-pred_va = model.predict(X_va)
-yv = y_va.values
-da = float(np.mean(np.sign(pred_va) == np.sign(yv)))
-r = float(np.corrcoef(pred_va, yv)[0, 1]) if np.std(pred_va) > 0 else 0.0
-denom = float(np.dot(pred_va, pred_va))          # scale minimizing RMSE vs truth
-SCALE = float(np.clip(np.dot(pred_va, yv) / denom, 0.05, 1.0)) if denom > 0 else 1.0
-print(f"[holdout] DA={da:.3f}  Pearson r={r:.3f}  SCALE={SCALE:.3f}  "
-      f"(DA/r are scale-invariant; SCALE only lifts error-improvement metrics)")
 
-try:                                              # informational: the kit's grade
+def _eval(params):
+    das, rs, oof_p, oof_t = [], [], [], []
+    for v0, v1 in folds:
+        tr_end = max(1, v0 - TARGET_BARS)                      # purge the horizon
+        m = LGBMRegressor(**{**BASE, **params}).fit(X_all.iloc[:tr_end], y_all.iloc[:tr_end])
+        p = m.predict(X_all.iloc[v0:v1]); t = y_all.iloc[v0:v1].values
+        das.append(float(np.mean(np.sign(p) == np.sign(t))))
+        rs.append(float(np.corrcoef(p, t)[0, 1]) if np.std(p) > 0 else 0.0)
+        oof_p += list(p); oof_t += list(t)
+    return np.mean(das), np.std(das), np.mean(rs), np.array(oof_p), np.array(oof_t)
+
+
+print(f"[tune] {len(GRID)} configs x {N_FOLDS} folds on {len(feature_cols)} features...")
+best = None
+for params in GRID:
+    da_m, da_s, r_m, oof_p, oof_t = _eval(params)
+    print(f"   depth={params['max_depth']} min_child={params['min_child_samples']:>3} | "
+          f"DA={da_m:.3f}+/-{da_s:.3f}  r={r_m:.3f}")
+    if best is None or da_m > best[0]:
+        best = (da_m, da_s, r_m, oof_p, oof_t, params)
+da_m, da_s, r_m, oof_p, oof_t, BEST_PARAMS = best
+print(f"[best] {BEST_PARAMS} -> DA={da_m:.3f}+/-{da_s:.3f}  r={r_m:.3f}")
+
+# ---------------- 3. shrink (SCALE) from out-of-fold predictions ----------------
+denom = float(np.dot(oof_p, oof_p))
+SCALE = float(np.clip(np.dot(oof_p, oof_t) / denom, 0.05, 1.0)) if denom > 0 else 1.0
+print(f"[scale] SCALE={SCALE:.3f}  (DA/r are scale-invariant; SCALE only lifts "
+      f"error-improvement metrics)")
+
+try:                                              # the kit's official grade
     from allora_forge_builder_kit import PerformanceEvaluator
-    print("[grade]", PerformanceEvaluator(workflow).evaluate(y_true=yv, y_pred=pred_va * SCALE))
+    print("[grade]", PerformanceEvaluator().evaluate(y_true=oof_t, y_pred=oof_p * SCALE))
 except Exception as exc:                          # noqa: BLE001
     print(f"[grade] skipped ({exc})")
 
 # ---------------- 4. refit on ALL data + predict closure ----------------
-final_model = LGBMRegressor(**LGBM_PARAMS).fit(df[feature_cols], df["target"])
+final_model = LGBMRegressor(**{**BASE, **BEST_PARAMS}).fit(X_all, y_all)
 
 
 def predict(nonce: int = None) -> float:
@@ -132,7 +153,7 @@ def predict(nonce: int = None) -> float:
         live = workflow.get_live_features(TICKERS[0])
     if live is None or len(live) == 0:
         raise ValueError("could not fetch live features")
-    x = live[feature_cols].tail(1).values
+    x = live[feature_cols].tail(1)                # DataFrame keeps feature names
     return float(final_model.predict(x)[0]) * SCALE
 
 
