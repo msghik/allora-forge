@@ -4,7 +4,7 @@ Plants a directional-only signal (sign predictable from one feature, magnitude
 pure noise) so the classifier family should win, then verifies the exported
 predict.pkl reloads and returns a finite float.
 """
-import sys, types, importlib.util, os, pickle
+import sys, types, importlib.util, os, pickle, threading
 import numpy as np
 import pandas as pd
 
@@ -37,7 +37,11 @@ def make_window_df(n_rows, seed_offset=0):
 DF = make_window_df(N_ROWS)
 
 class FakeWorkflow:
-    def __init__(self, **kw): pass
+    def __init__(self, **kw):
+        # Real data managers hold locks/threads (Binance websocket client).
+        # If predict's closure ever captures a constructed workflow again,
+        # cloudpickle.dump must fail here like it did in production.
+        self._lock = threading.Lock()
     def backfill(self, start=None): pass
     def get_full_feature_target_dataframe(self, start_date=None):
         return DF.set_index("open_time")

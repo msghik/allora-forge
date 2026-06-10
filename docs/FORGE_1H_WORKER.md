@@ -228,5 +228,7 @@ the retrain/gate automation.
 | `this mnemonic derives allo1xyz...` error | Wrong seed phrase. Locate the right one (section 5) or update the Forge account's wallet address. |
 | Worker exits immediately | `worker_logs/*.log` has the reason — usually missing `ALLORA_API_KEY`, empty balance (faucet), or a `predict.pkl` that raises. |
 | `predict.pkl` fails to load on redeploy | Export it by running `train_1h_model.py` as a script (cloudpickle captures by value only from `__main__`). |
+| `TypeError: cannot pickle '_thread.lock'` on export | Fixed in the current trainer: the artifact rebuilds its live data connection lazily instead of capturing the workflow (Binance's websocket client holds locks). Pull the latest `scripts/train_1h_model.py`. |
+| Trained on `binance` unintentionally | The trainer falls back to Binance when `ALLORA_API_KEY` isn't in the environment — check the "Data source:" line at startup. Either source works, but be consistent between runs you compare; the artifact records which source it uses for live data (printed at export). |
 | Submissions revert / out of gas | Balance ran dry — hit the faucet again. |
 | Scores are terrible despite good backtest | Check you're submitting a **log-return**, not a price; check the topic ID; remember 1h log-returns are tiny (±0.002 typical) so a price-scale output destroys your ZPTAE. |

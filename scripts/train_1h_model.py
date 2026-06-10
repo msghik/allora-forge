@@ -366,10 +366,41 @@ def main() -> None:
     ticker = tickers[0]
     vol_norm = VOL_NORM_TARGET
     n_bars = INPUT_BARS
+    ds_name = data_source
+    ds_tickers = list(tickers)
+
+    # The live workflow is rebuilt lazily inside predict: data managers hold
+    # threads/locks (e.g. the Binance websocket client) that cannot be
+    # pickled, and a fresh worker process needs its own live connection
+    # anyway. Only plain config crosses the pickle boundary; the API key is
+    # re-read from the runtime environment, never embedded in the artifact.
+    _live: dict = {"wf": None}
+
+    def _live_workflow():
+        if _live["wf"] is None:
+            import os as _os
+            from allora_forge_builder_kit import AlloraMLWorkflow as _Workflow
+            kw = {}
+            if ds_name == "allora":
+                key = _os.environ.get("ALLORA_API_KEY", "").strip()
+                if not key:
+                    for p in (".allora_api_key", "notebooks/.allora_api_key"):
+                        if _os.path.exists(p):
+                            key = open(p).read().strip()
+                            break
+                if not key:
+                    raise RuntimeError(
+                        "ALLORA_API_KEY required at inference time for the allora data source")
+                kw["api_key"] = key
+            _live["wf"] = _Workflow(
+                tickers=ds_tickers, number_of_input_bars=n_bars,
+                target_bars=TARGET_BARS, interval=INTERVAL,
+                data_source=ds_name, **kw)
+        return _live["wf"]
 
     def predict(nonce: int | None = None) -> float:
         """Return the predicted 1h BTC/USD **log-return** (not a price)."""
-        live_row = workflow.get_live_features(ticker=ticker)
+        live_row = _live_workflow().get_live_features(ticker=ticker)
         if live_row is None or len(live_row) == 0:
             raise ValueError("could not fetch live features")
         live_row = live_row.reset_index()
@@ -393,9 +424,13 @@ def main() -> None:
     if not np.isfinite(test_val):
         sys.exit("predict() returned a non-finite value; not exporting")
 
+    # Drop the live connection the smoke test created — it must not (and often
+    # cannot) cross the pickle boundary; the worker rebuilds it on first call.
+    _live["wf"] = None
     with open(OUT_PKL, "wb") as f:
         cloudpickle.dump(predict, f)
-    print(f"\nSaved {OUT_PKL}. Deploy with your registered Forge wallet:")
+    print(f"\nSaved {OUT_PKL} (family={family}, live data via '{ds_name}').")
+    print("Deploy with your registered Forge wallet:")
     print("  TOPIC_ID=<id from scripts/find_topic_id.py> python scripts/deploy_my_worker.py")
 
 
