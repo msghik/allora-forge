@@ -104,8 +104,40 @@ How the printed metrics map to the Forge **mainnet-whitelist criteria**:
 
 Also watch the **log-aspect ratio** criterion: `log10(std(pred)/std(true))`
 must stay within ±0.5 — heavily regularized models that predict near-zero
-everywhere fail it. If your predictions are 10× too timid, consider milder
-regularization rather than post-hoc scaling.
+everywhere fail it. The trainer's shrink calibration handles this for you:
+it scales predictions to the loudness that maximizes the ZPTAE proxy while
+preferring the whitelist's aspect band.
+
+### Improving your score
+
+The 1h horizon is the noisiest task on the Forge — `0/7` on a first run is
+normal, and even good live models typically sit around 3–5/7 at any moment.
+The whitelist integrates over long baselines, so liveness + consistency
+matter as much as any single backtest. The binding metric is **Pearson r**:
+once r genuinely exceeds ~0.05, the calibrated WRMSE/ZPTAE improvements
+follow almost automatically. Knobs to iterate on (all env vars):
+
+| Knob | Default | Effect |
+|---|---|---|
+| `DAYS_OF_HISTORY` | 1000 | More (weighted) samples → lower-variance fit. Don't truncate to "recent regime only" — see below. |
+| `HALF_LIFE_DAYS` | 270 | Recency weighting: a sample this old counts half. Lower = more regime-adaptive, higher = more data-efficient. |
+| `VOL_NORM_TARGET` | 1 | Train on `r/σ₁₀₀` instead of raw returns. Set `0` to A/B it. |
+| `INPUT_BARS` | 128 | Lookback window; ≥101 keeps the σ₁₀₀ feature exact. |
+
+**On training only on the last year ("regimes change"):** truncating history
+is the bluntest regime tool and usually loses at this noise level — a weak
+signal needs every sample you can get. The script handles regime drift two
+better ways: *recency weighting* (old data fades smoothly instead of being
+deleted) and *vol-normalizing the target* (dividing by trailing σ makes a
+quiet 2024 hour and a violent 2026 hour statistically comparable, which is
+also exactly how the topic's ZPTAE z-scores errors). If you want to test the
+hypothesis anyway, run `DAYS_OF_HISTORY=365 HALF_LIFE_DAYS=10000` and compare
+— that's a fair A/B.
+
+Beyond knobs, the levers that actually move r at 1h: cross-asset lead-lag
+features (ETH/SOL returns), order-flow/funding data, and intraday seasonality
+interactions. The kit's `allora_research_model_skills/` bundle has three
+structured methodologies for this search.
 
 ## 5. Deploy with YOUR wallet (the part that bit you)
 

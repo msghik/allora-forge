@@ -6,15 +6,33 @@ i.e. ``target_bars=1`` at ``interval="1h"``. The exported ``predict(nonce)``
 returns the predicted **log-return as a float** — for log-return topics you
 submit the log-return itself, NOT a price.
 
-Requires the Allora Forge Builder Kit (pip install from its repo) and an
-ALLORA_API_KEY (free at https://developer.allora.network). Run as a script
-from the repo root — cloudpickle captures closures by value only when this
-file executes as __main__:
+v2 — designed around the three failure modes of v1 (0-2/7 grades):
+
+* compact stationary features (~30) instead of 240 raw normalized OHLCV
+  columns — at 1h the signal-to-noise ratio is brutal and feature count is
+  variance you pay for;
+* the model learns a **vol-normalized** target z = r / sigma100 (sigma100 =
+  trailing std of the last 100 hourly log-returns, the same reference std the
+  competition's ZPTAE uses). This makes 2024 and 2026 regimes comparable, so
+  long histories help instead of hurting;
+* **recency-weighted** training (exponential half-life) instead of truncating
+  history — old samples fade, they aren't thrown away;
+* Huber objective (fat tails shouldn't drag the fit) and a final **shrinkage
+  calibration**: predictions are scaled by the lambda that maximizes
+  ZPTAE-proxy improvement vs the zero baseline, subject to the whitelist's
+  log-aspect-ratio bound |log10(std(pred)/std(true))| <= 0.5.
+
+Requires the Allora Forge Builder Kit and an ALLORA_API_KEY (free at
+https://developer.allora.network). Run as a script from the repo root —
+cloudpickle captures closures by value only when this file executes as
+__main__:
 
     export ALLORA_API_KEY=UP-...
     python scripts/train_1h_model.py
 
-Env overrides: DAYS_OF_HISTORY, INPUT_BARS, DATA_SOURCE (allora|binance).
+Env knobs: DAYS_OF_HISTORY (1000), INPUT_BARS (128), HALF_LIFE_DAYS (270),
+VOL_NORM_TARGET (1; set 0 to A/B raw-target training), DATA_SOURCE
+(allora|binance), PREDICT_PKL.
 """
 from __future__ import annotations
 
@@ -32,17 +50,35 @@ from allora_forge_builder_kit import AlloraMLWorkflow, PerformanceEvaluator
 
 # --- competition task: 1h BTC/USD log-return ---
 INTERVAL = "1h"
-TARGET_BARS = 1                # 1 bar ahead at 1h interval = 1 hour
-INPUT_BARS = int(os.environ.get("INPUT_BARS", "48"))
-DAYS_OF_HISTORY = int(os.environ.get("DAYS_OF_HISTORY", "500"))
+TARGET_BARS = 1                 # 1 bar ahead at 1h interval = 1 hour
+INPUT_BARS = int(os.environ.get("INPUT_BARS", "128"))   # >=101 so sigma100 fits
+DAYS_OF_HISTORY = int(os.environ.get("DAYS_OF_HISTORY", "1000"))
+
+# --- regime handling ---
+SIGMA_WINDOW = 100              # matches the topic's ZPTAE reference std
+VOL_NORM_TARGET = os.environ.get("VOL_NORM_TARGET", "1") != "0"
+HALF_LIFE_DAYS = float(os.environ.get("HALF_LIFE_DAYS", "270"))
+Z_CLIP = 6.0                    # clip vol-normalized target tails
 
 # --- model search (small, conservative grid; expand once the loop works) ---
 N_SPLITS = 3
-N_ESTIMATORS_MAX = 500
-N_ESTIMATORS_CHECKPOINTS = [100, 300, 500]
-LEARNING_RATES = [0.01, 0.05]
+N_ESTIMATORS_MAX = 800
+N_ESTIMATORS_CHECKPOINTS = [200, 400, 800]
+LEARNING_RATES = [0.02, 0.05]
 MAX_DEPTHS = [3, 5]
 NUM_LEAVES = [15, 31]
+FIXED_LGBM = dict(
+    objective="huber", alpha=1.0,
+    min_child_samples=100, subsample=0.8, subsample_freq=1,
+    colsample_bytree=0.8, reg_lambda=1.0, random_state=42, verbose=-1,
+)
+
+# --- magnitude calibration ---
+SHRINK_GRID = [0.25, 0.4, 0.6, 0.8, 1.0, 1.3]
+ASPECT_BOUND = 0.5              # whitelist: |log10(std(pred)/std(true))| < 0.5
+
+RET_LAGS = (1, 2, 3, 4, 6, 12, 24, 48, 96)
+VOL_WINDOWS = (6, 24, 96)
 
 OUT_PKL = os.environ.get("PREDICT_PKL", "predict.pkl")
 
@@ -66,14 +102,69 @@ def resolve_data_source() -> tuple[str, list[str], dict]:
     return "allora", ["btcusd"], {"api_key": api_key}
 
 
+def matrices_from_workflow_df(df: pd.DataFrame, n_bars: int):
+    """Pull the kit's normalized OHLCV window back into (n, bars) matrices."""
+    cols = lambda f: [f"feature_{f}_{i}" for i in range(n_bars)]
+    C = df[cols("close")].to_numpy(dtype=float)
+    H = df[cols("high")].to_numpy(dtype=float)
+    L = df[cols("low")].to_numpy(dtype=float)
+    V = df[cols("volume")].to_numpy(dtype=float)
+    when = pd.to_datetime(df["open_time"], utc=True)
+    return C, H, L, V, when
+
+
+def compact_features(C, H, L, V, when) -> tuple[pd.DataFrame, np.ndarray]:
+    """~30 stationary features per row + sigma100 (trailing hourly-return std).
+
+    OHLC are normalized by the window's last close, so log-return and range
+    features computed here equal those on raw prices (scale cancels).
+    """
+    eps = 1e-12
+    B = C.shape[1]
+    logc = np.log(np.maximum(C, eps))
+    r1 = np.diff(logc, axis=1)                       # (n, B-1) hourly log-returns
+    sw = min(SIGMA_WINDOW, r1.shape[1])
+    sigma100 = r1[:, -sw:].std(axis=1) + eps
+
+    f: dict[str, np.ndarray] = {}
+    for lag in RET_LAGS:
+        if lag <= B - 1:
+            f[f"ret_{lag}"] = logc[:, -1] - logc[:, -1 - lag]
+    for w in VOL_WINDOWS:
+        if w <= r1.shape[1]:
+            f[f"rv_{w}"] = r1[:, -w:].std(axis=1)
+    if "rv_96" in f:
+        f["rv_ratio_6_96"] = f["rv_6"] / (f["rv_96"] + eps)
+        f["rv_ratio_24_96"] = f["rv_24"] / (f["rv_96"] + eps)
+    for lag in (1, 6, 24):                            # scale-free momentum
+        if f"ret_{lag}" in f:
+            f[f"zret_{lag}"] = f[f"ret_{lag}"] / (sigma100 * np.sqrt(lag))
+    g = np.clip(r1[:, -14:], 0, None).mean(axis=1)    # RSI-style balance
+    l = np.clip(-r1[:, -14:], 0, None).mean(axis=1)
+    f["rsi_14"] = 100.0 * g / (g + l + eps)
+    hi24 = H[:, -24:].max(axis=1)
+    lo24 = L[:, -24:].min(axis=1)
+    f["hl_range_24"] = hi24 - lo24                    # already in last-close units
+    f["range_pos_24"] = (C[:, -1] - lo24) / (hi24 - lo24 + eps)
+    f["vol_z_24"] = (V[:, -1] - V[:, -24:].mean(axis=1)) / (V[:, -24:].std(axis=1) + eps)
+    f["vol_trend"] = V[:, -6:].mean(axis=1) / (V[:, -48:].mean(axis=1) + eps)
+    f["sigma_100"] = sigma100
+    hour = when.dt.hour.to_numpy()
+    dow = when.dt.dayofweek.to_numpy()
+    f["hour_sin"] = np.sin(2 * np.pi * hour / 24.0)
+    f["hour_cos"] = np.cos(2 * np.pi * hour / 24.0)
+    f["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)
+    f["dow_cos"] = np.cos(2 * np.pi * dow / 7.0)
+    return pd.DataFrame(f, index=when.index), sigma100
+
+
 def power_tanh(x: np.ndarray, p: float = 1.5) -> np.ndarray:
-    """Smooth bounded transform with a power-law-ish ramp — a stand-in for the
-    competition's power-tanh. The official ZPTAE constant/tail differs slightly;
-    this proxy is only used to compare *relative* loss vs the zero baseline."""
+    """Smooth bounded transform — a stand-in for the competition's power-tanh.
+    Only used to compare *relative* loss vs the zero baseline."""
     return np.tanh(np.abs(x)) ** p
 
 
-def zptae_proxy(y_true: np.ndarray, y_pred: np.ndarray, window: int = 100) -> float:
+def zptae_proxy(y_true: np.ndarray, y_pred: np.ndarray, window: int = SIGMA_WINDOW) -> float:
     """Mean power-tanh of |error| z-scored by the trailing std of the last
     ``window`` ground-truth log-returns (ref mean 0), like the topic's loss."""
     s = pd.Series(y_true)
@@ -85,10 +176,60 @@ def zptae_proxy(y_true: np.ndarray, y_pred: np.ndarray, window: int = 100) -> fl
     return float(np.mean(power_tanh(z)))
 
 
+def aspect_ratio(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.log10((y_pred.std() + 1e-15) / (y_true.std() + 1e-15)))
+
+
+def tune_shrink(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float]:
+    """Pick a scale lambda for the predictions, balancing two pulls:
+
+    * ZPTAE/WRMSE want weak signals scaled way down (the RMSE-optimal scale is
+      lambda* = cov(pred, true)/var(pred), tiny when correlation is low);
+    * the whitelist's |log10(std(pred)/std(true))| <= ASPECT_BOUND sets a
+      *floor* on loudness — silence is not an option.
+
+    Candidates: fixed grid + lambda* + the aspect-feasibility boundaries.
+    Policy: take the best feasible lambda unless the unconstrained best beats
+    it by more than 2pp of improvement, in which case prefer score and warn.
+    Returns (lambda, zptae_improvement, aspect).
+    """
+    eps = 1e-15
+    zp_zero = zptae_proxy(y_true, np.zeros_like(y_pred))
+    sy, sp = y_true.std() + eps, y_pred.std() + eps
+    lam_floor = (10.0 ** -ASPECT_BOUND) * sy / sp     # quietest feasible
+    lam_ceil = (10.0 ** ASPECT_BOUND) * sy / sp       # loudest feasible
+    lam_star = float(np.dot(y_pred, y_true) / (np.dot(y_pred, y_pred) + eps))
+    cands = set(SHRINK_GRID) | {lam_floor * 1.01, lam_ceil * 0.99}
+    if lam_star > 0:
+        cands |= {lam_star, min(max(lam_star, lam_floor * 1.01), lam_ceil * 0.99)}
+
+    best, best_feasible = None, None
+    for lam in sorted(c for c in cands if c > 0):
+        zp = zptae_proxy(y_true, lam * y_pred)
+        imp = 1.0 - zp / zp_zero if zp_zero and np.isfinite(zp) else float("-inf")
+        asp = aspect_ratio(y_true, lam * y_pred)
+        cand = (imp, lam, asp)
+        if best is None or imp > best[0]:
+            best = cand
+        if abs(asp) <= ASPECT_BOUND and (best_feasible is None or imp > best_feasible[0]):
+            best_feasible = cand
+    chosen = best
+    if best_feasible is not None and best_feasible[0] >= best[0] - 0.02:
+        chosen = best_feasible
+    elif best_feasible is not None:
+        print(f"  note: taking lambda={best[1]:.3f} for score; aspect {best[2]:+.2f} "
+              f"violates the +/-{ASPECT_BOUND} whitelist bound "
+              f"(best feasible was {best_feasible[0]:+.2%} at lambda={best_feasible[1]:.3f})")
+    imp, lam, asp = chosen
+    return lam, imp, asp
+
+
 def main() -> None:
     print("=" * 78)
-    print("1h BTC/USD log-return — train / evaluate / export")
+    print("1h BTC/USD log-return — train / evaluate / export (v2)")
     print("=" * 78)
+    print(f"history={DAYS_OF_HISTORY}d  input_bars={INPUT_BARS}  "
+          f"vol_norm_target={VOL_NORM_TARGET}  half_life={HALF_LIFE_DAYS}d")
 
     data_source, tickers, dm_kwargs = resolve_data_source()
     workflow = AlloraMLWorkflow(
@@ -107,29 +248,24 @@ def main() -> None:
     except Exception as e:  # cached parquet may still cover us
         print(f"  backfill warning: {e} — trying locally cached data")
 
-    print("[2/5] Building feature/target dataframe ...")
+    print("[2/5] Building features ...")
     df_all = workflow.get_full_feature_target_dataframe(start_date=start_date).reset_index()
+    df_all = df_all.dropna(subset=["target"]).reset_index(drop=True)
 
-    # Engineered momentum features on top of the kit's normalized OHLCV bars.
-    def engineer_returns(row):
-        closes = np.array([row[f"feature_close_{i}"] for i in range(INPUT_BARS)])
-        out = {}
-        for name, lag in (("ret_1h", 1), ("ret_6h", 6), ("ret_12h", 12), ("ret_24h", 24)):
-            out[name] = (
-                np.log(closes[-1] + 1e-8) - np.log(closes[-1 - lag] + 1e-8)
-                if INPUT_BARS > lag else 0.0
-            )
-        return pd.Series(out)
+    C, H, L, V, when = matrices_from_workflow_df(df_all, INPUT_BARS)
+    X, sigma100 = compact_features(C, H, L, V, when)
+    feature_cols = list(X.columns)
+    y_raw = df_all["target"].to_numpy(dtype=float)
+    y_train_space = np.clip(y_raw / sigma100, -Z_CLIP, Z_CLIP) if VOL_NORM_TARGET else y_raw
 
-    base_feature_cols = [c for c in df_all.columns if c.startswith("feature_")]
-    engineered = df_all.apply(engineer_returns, axis=1)
-    df_all = pd.concat([df_all, engineered], axis=1)
-    feature_cols = base_feature_cols + list(engineered.columns)
-    df_all = df_all.dropna(subset=feature_cols + ["target"]).reset_index(drop=True)
-    print(f"  {len(df_all):,} samples, {len(feature_cols)} features "
-          f"({df_all['open_time'].min()} → {df_all['open_time'].max()})")
+    # Recency weights: a sample HALF_LIFE_DAYS old counts half as much.
+    age_days = (when.max() - when).dt.total_seconds().to_numpy() / 86400.0
+    weights = 0.5 ** (age_days / HALF_LIFE_DAYS)
 
-    print("[3/5] Walk-forward grid search ...")
+    print(f"  {len(X):,} samples, {len(feature_cols)} features "
+          f"({when.min()} → {when.max()})")
+
+    print("[3/5] Walk-forward grid search (selecting on calibrated ZPTAE-proxy improvement) ...")
     tscv = TimeSeriesSplit(n_splits=N_SPLITS, gap=TARGET_BARS)
     evaluator = PerformanceEvaluator()
     results = []
@@ -138,68 +274,71 @@ def main() -> None:
         for depth in MAX_DEPTHS:
             for leaves in NUM_LEAVES:
                 fold_models = []
-                for train_idx, test_idx in tscv.split(df_all):
-                    m = LGBMRegressor(
-                        n_estimators=N_ESTIMATORS_MAX, learning_rate=lr, max_depth=depth,
-                        num_leaves=leaves, random_state=42, verbose=-1,
-                    )
-                    m.fit(df_all.iloc[train_idx][feature_cols], df_all.iloc[train_idx]["target"])
+                for train_idx, test_idx in tscv.split(X):
+                    m = LGBMRegressor(n_estimators=N_ESTIMATORS_MAX, learning_rate=lr,
+                                      max_depth=depth, num_leaves=leaves, **FIXED_LGBM)
+                    m.fit(X.iloc[train_idx], y_train_space[train_idx],
+                          sample_weight=weights[train_idx])
                     fold_models.append((m, test_idx))
                 for n_est in N_ESTIMATORS_CHECKPOINTS:
                     n += 1
-                    df_all["pred"] = np.nan
+                    pred = np.full(len(X), np.nan)
                     for m, test_idx in fold_models:
-                        df_all.iloc[test_idx, df_all.columns.get_loc("pred")] = m.predict(
-                            df_all.iloc[test_idx][feature_cols], num_iteration=n_est
-                        )
-                    mask = ~df_all["pred"].isna()
-                    metrics = evaluator.evaluate(y_true=df_all.loc[mask, "target"],
-                                                 y_pred=df_all.loc[mask, "pred"])
-                    results.append({"n_estimators": n_est, "learning_rate": lr, "max_depth": depth,
-                                    "num_leaves": leaves, "mask": mask.copy(),
-                                    "pred": df_all["pred"].copy(), **metrics})
+                        pred[test_idx] = m.predict(X.iloc[test_idx], num_iteration=n_est)
+                    mask = np.isfinite(pred)
+                    # back to log-return units before any scoring
+                    pred_lr = pred[mask] * (sigma100[mask] if VOL_NORM_TARGET else 1.0)
+                    lam, imp, asp = tune_shrink(y_raw[mask], pred_lr)
+                    da = float(np.mean(np.sign(pred_lr) == np.sign(y_raw[mask])))
+                    results.append({"n_estimators": n_est, "learning_rate": lr,
+                                    "max_depth": depth, "num_leaves": leaves,
+                                    "lambda": lam, "zptae_imp": imp, "aspect": asp,
+                                    "da": da, "mask": mask, "pred_lr": pred_lr})
                     print(f"  [{n:2d}] n={n_est:3d} lr={lr:.2f} d={depth} l={leaves:2d} -> "
-                          f"{metrics['num_passed']}/7 ({metrics['grade']})")
+                          f"zptae_imp={imp:+.2%} (lam={lam:.2f}, aspect={asp:+.2f}, DA={da:.4f})")
 
-    results.sort(key=lambda r: (r["num_passed"], r["score"]), reverse=True)
+    results.sort(key=lambda r: (r["zptae_imp"], r["da"]), reverse=True)
     best = results[0]
-    print(f"\n[4/5] Best config: n={best['n_estimators']} lr={best['learning_rate']} "
-          f"d={best['max_depth']} l={best['num_leaves']}")
-    best_report = evaluator.evaluate(y_true=df_all.loc[best["mask"], "target"],
-                                     y_pred=best["pred"][best["mask"]])
-    evaluator.print_report(best_report, detailed=False)
-
-    # Competition-style loss proxy vs the zero-prediction baseline (out-of-sample preds).
-    y_true = df_all.loc[best["mask"], "target"].to_numpy()
-    y_pred = best["pred"][best["mask"]].to_numpy()
-    zp_model = zptae_proxy(y_true, y_pred)
-    zp_zero = zptae_proxy(y_true, np.zeros_like(y_pred))
-    if np.isfinite(zp_model) and np.isfinite(zp_zero) and zp_zero > 0:
-        print(f"  ZPTAE proxy: model={zp_model:.4f} zero-baseline={zp_zero:.4f} "
-              f"improvement={(1 - zp_model / zp_zero):+.1%} (whitelist target > +20%)")
+    lam = best["lambda"]
+    print(f"\n[4/5] Best: n={best['n_estimators']} lr={best['learning_rate']} "
+          f"d={best['max_depth']} l={best['num_leaves']} lambda={lam:.2f}")
+    print("  NOTE: lambda and config were chosen on the same OOS folds — expect the live")
+    print("  numbers to be a bit weaker. The full 7-metric report on calibrated preds:")
+    y_oos = y_raw[best["mask"]]
+    p_oos = lam * best["pred_lr"]
+    report = evaluator.evaluate(y_true=pd.Series(y_oos), y_pred=pd.Series(p_oos))
+    evaluator.print_report(report, detailed=False)
+    zp_imp = best["zptae_imp"]
+    print(f"  ZPTAE proxy improvement vs zero: {zp_imp:+.2%} (whitelist target > +20%)")
+    print(f"  log-aspect ratio: {aspect_ratio(y_oos, p_oos):+.3f} (whitelist: within ±{ASPECT_BOUND})")
 
     print("[5/5] Training production model on all data and exporting ...")
     final_model = LGBMRegressor(
         n_estimators=best["n_estimators"], learning_rate=best["learning_rate"],
-        max_depth=best["max_depth"], num_leaves=best["num_leaves"],
-        random_state=42, verbose=-1,
+        max_depth=best["max_depth"], num_leaves=best["num_leaves"], **FIXED_LGBM,
     )
-    final_model.fit(df_all[feature_cols], df_all["target"])
+    final_model.fit(X, y_train_space, sample_weight=weights)
 
     ticker = tickers[0]
+    vol_norm = VOL_NORM_TARGET
+    n_bars = INPUT_BARS
 
     def predict(nonce: int | None = None) -> float:
         """Return the predicted 1h BTC/USD **log-return** (not a price)."""
         live_row = workflow.get_live_features(ticker=ticker)
         if live_row is None or len(live_row) == 0:
             raise ValueError("could not fetch live features")
-        live_returns = engineer_returns(live_row.iloc[0])
-        feats = pd.concat([live_row[base_feature_cols].iloc[0], live_returns])
-        log_ret = float(final_model.predict(feats[feature_cols].values.reshape(1, -1))[0])
+        live_row = live_row.reset_index()
+        if "open_time" not in live_row.columns:   # fall back to "now" for time feats
+            live_row["open_time"] = pd.Timestamp.now(tz="UTC")
+        Cl, Hl, Ll, Vl, wl = matrices_from_workflow_df(live_row, n_bars)
+        X_live, sigma_live = compact_features(Cl, Hl, Ll, Vl, wl)
+        raw = float(final_model.predict(X_live[feature_cols])[0])
+        log_ret = lam * raw * (float(sigma_live[0]) if vol_norm else 1.0)
         if abs(log_ret) > 0.2:
             print(f"warning: implausible 1h log-return {log_ret:+.4f}")
         print(f"1h BTC log-return prediction: {log_ret:+.6f}")
-        return log_ret
+        return float(log_ret)
 
     print("  smoke-testing predict() against live data ...")
     test_val = predict()
