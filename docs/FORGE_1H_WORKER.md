@@ -123,6 +123,15 @@ follow almost automatically. Knobs to iterate on (all env vars):
 | `HALF_LIFE_DAYS` | 270 | Recency weighting: a sample this old counts half. Lower = more regime-adaptive, higher = more data-efficient. |
 | `VOL_NORM_TARGET` | 1 | Train on `r/σ₁₀₀` instead of raw returns. Set `0` to A/B it. |
 | `INPUT_BARS` | 128 | Lookback window; ≥101 keeps the σ₁₀₀ feature exact. |
+| `FAMILIES` | `reg,clf` | Model families to A/B: return regressor and sign classifier (`(2·p_up−1)·σ₁₀₀`). The classifier wins when the edge is directional-only (DA significant, r ≈ 0). |
+| `STRICT_ASPECT` | 0 | `1` = always pick a loudness inside the whitelist's ±0.5 aspect band, even when a quieter scale would score better on ZPTAE. Use it when optimizing for whitelisting rather than the leaderboard. |
+
+**Leaderboard vs whitelist:** with a weak signal, the ZPTAE-optimal model is
+*quiet* (predictions much smaller than true returns), but the whitelist's
+aspect bound demands `std(pred) ≥ ~0.32·std(true)`. At that loudness, beating
+the zero baseline on pure error terms needs roughly `r ≳ 0.16`. The trainer
+prints both tracks (per-family best + the calibration note) so you always
+know which side of the tradeoff your artifact is on.
 
 **On training only on the last year ("regimes change"):** truncating history
 is the bluntest regime tool and usually loses at this noise level — a weak

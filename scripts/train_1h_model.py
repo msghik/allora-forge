@@ -20,7 +20,11 @@ v2 — designed around the three failure modes of v1 (0-2/7 grades):
 * Huber objective (fat tails shouldn't drag the fit) and a final **shrinkage
   calibration**: predictions are scaled by the lambda that maximizes
   ZPTAE-proxy improvement vs the zero baseline, subject to the whitelist's
-  log-aspect-ratio bound |log10(std(pred)/std(true))| <= 0.5.
+  log-aspect-ratio bound |log10(std(pred)/std(true))| <= 0.5;
+* two model families A/B'd on the same folds: a return **regressor** and a
+  sign **classifier** mapped to (2*p_up - 1) * sigma100 — when the edge is
+  directional-only (DA significant, Pearson r ~ 0) the classifier puts the
+  model's capacity where the signal actually is.
 
 Requires the Allora Forge Builder Kit and an ALLORA_API_KEY (free at
 https://developer.allora.network). Run as a script from the repo root —
@@ -31,8 +35,9 @@ __main__:
     python scripts/train_1h_model.py
 
 Env knobs: DAYS_OF_HISTORY (1000), INPUT_BARS (128), HALF_LIFE_DAYS (270),
-VOL_NORM_TARGET (1; set 0 to A/B raw-target training), DATA_SOURCE
-(allora|binance), PREDICT_PKL.
+VOL_NORM_TARGET (1; set 0 to A/B raw-target training), FAMILIES (reg,clf),
+STRICT_ASPECT (0; set 1 to always keep the whitelist aspect band),
+DATA_SOURCE (allora|binance), PREDICT_PKL.
 """
 from __future__ import annotations
 
@@ -43,7 +48,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 import cloudpickle
-from lightgbm import LGBMRegressor
+from lightgbm import LGBMRegressor, LGBMClassifier
 from sklearn.model_selection import TimeSeriesSplit
 
 from allora_forge_builder_kit import AlloraMLWorkflow, PerformanceEvaluator
@@ -61,21 +66,30 @@ HALF_LIFE_DAYS = float(os.environ.get("HALF_LIFE_DAYS", "270"))
 Z_CLIP = 6.0                    # clip vol-normalized target tails
 
 # --- model search (small, conservative grid; expand once the loop works) ---
+# Two families are searched and A/B'd on the same folds:
+#   reg — Huber regression on the (vol-normalized) return
+#   clf — sign classifier; prediction = (2*p_up - 1) * sigma100, i.e. direction
+#         conviction scaled by current vol. Wins when the edge is directional
+#         (DA significant) but magnitude correlation is ~0.
 N_SPLITS = 3
 N_ESTIMATORS_MAX = 800
 N_ESTIMATORS_CHECKPOINTS = [200, 400, 800]
 LEARNING_RATES = [0.02, 0.05]
 MAX_DEPTHS = [3, 5]
 NUM_LEAVES = [15, 31]
-FIXED_LGBM = dict(
-    objective="huber", alpha=1.0,
+FIXED_COMMON = dict(
     min_child_samples=100, subsample=0.8, subsample_freq=1,
     colsample_bytree=0.8, reg_lambda=1.0, random_state=42, verbose=-1,
 )
+REG_EXTRA = dict(objective="huber", alpha=1.0)
+FAMILIES = tuple(os.environ.get("FAMILIES", "reg,clf").split(","))
 
 # --- magnitude calibration ---
 SHRINK_GRID = [0.25, 0.4, 0.6, 0.8, 1.0, 1.3]
 ASPECT_BOUND = 0.5              # whitelist: |log10(std(pred)/std(true))| < 0.5
+# STRICT_ASPECT=1 always picks a whitelist-compliant loudness, even when a
+# quieter scale would score better on ZPTAE (leaderboard vs whitelist tradeoff).
+STRICT_ASPECT = os.environ.get("STRICT_ASPECT", "0") != "0"
 
 RET_LAGS = (1, 2, 3, 4, 6, 12, 24, 48, 96)
 VOL_WINDOWS = (6, 24, 96)
@@ -180,7 +194,7 @@ def aspect_ratio(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.log10((y_pred.std() + 1e-15) / (y_true.std() + 1e-15)))
 
 
-def tune_shrink(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float]:
+def tune_shrink(y_true: np.ndarray, y_pred: np.ndarray, verbose: bool = False) -> tuple[float, float, float]:
     """Pick a scale lambda for the predictions, balancing two pulls:
 
     * ZPTAE/WRMSE want weak signals scaled way down (the RMSE-optimal scale is
@@ -190,7 +204,8 @@ def tune_shrink(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, f
 
     Candidates: fixed grid + lambda* + the aspect-feasibility boundaries.
     Policy: take the best feasible lambda unless the unconstrained best beats
-    it by more than 2pp of improvement, in which case prefer score and warn.
+    it by more than 2pp of improvement, in which case prefer score (set
+    STRICT_ASPECT=1 to always stay in the whitelist band).
     Returns (lambda, zptae_improvement, aspect).
     """
     eps = 1e-15
@@ -214,12 +229,13 @@ def tune_shrink(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, f
         if abs(asp) <= ASPECT_BOUND and (best_feasible is None or imp > best_feasible[0]):
             best_feasible = cand
     chosen = best
-    if best_feasible is not None and best_feasible[0] >= best[0] - 0.02:
+    if best_feasible is not None and (STRICT_ASPECT or best_feasible[0] >= best[0] - 0.02):
         chosen = best_feasible
-    elif best_feasible is not None:
+    elif verbose and best_feasible is not None:
         print(f"  note: taking lambda={best[1]:.3f} for score; aspect {best[2]:+.2f} "
               f"violates the +/-{ASPECT_BOUND} whitelist bound "
-              f"(best feasible was {best_feasible[0]:+.2%} at lambda={best_feasible[1]:.3f})")
+              f"(best feasible was {best_feasible[0]:+.2%} at lambda={best_feasible[1]:.3f};"
+              f" STRICT_ASPECT=1 forces compliance)")
     imp, lam, asp = chosen
     return lam, imp, asp
 
@@ -265,46 +281,70 @@ def main() -> None:
     print(f"  {len(X):,} samples, {len(feature_cols)} features "
           f"({when.min()} → {when.max()})")
 
+    y_sign = (y_raw > 0).astype(int)
+
     print("[3/5] Walk-forward grid search (selecting on calibrated ZPTAE-proxy improvement) ...")
     tscv = TimeSeriesSplit(n_splits=N_SPLITS, gap=TARGET_BARS)
     evaluator = PerformanceEvaluator()
     results = []
     n = 0
-    for lr in LEARNING_RATES:
-        for depth in MAX_DEPTHS:
-            for leaves in NUM_LEAVES:
-                fold_models = []
-                for train_idx, test_idx in tscv.split(X):
-                    m = LGBMRegressor(n_estimators=N_ESTIMATORS_MAX, learning_rate=lr,
-                                      max_depth=depth, num_leaves=leaves, **FIXED_LGBM)
-                    m.fit(X.iloc[train_idx], y_train_space[train_idx],
-                          sample_weight=weights[train_idx])
-                    fold_models.append((m, test_idx))
-                for n_est in N_ESTIMATORS_CHECKPOINTS:
-                    n += 1
-                    pred = np.full(len(X), np.nan)
-                    for m, test_idx in fold_models:
-                        pred[test_idx] = m.predict(X.iloc[test_idx], num_iteration=n_est)
-                    mask = np.isfinite(pred)
-                    # back to log-return units before any scoring
-                    pred_lr = pred[mask] * (sigma100[mask] if VOL_NORM_TARGET else 1.0)
-                    lam, imp, asp = tune_shrink(y_raw[mask], pred_lr)
-                    da = float(np.mean(np.sign(pred_lr) == np.sign(y_raw[mask])))
-                    results.append({"n_estimators": n_est, "learning_rate": lr,
-                                    "max_depth": depth, "num_leaves": leaves,
-                                    "lambda": lam, "zptae_imp": imp, "aspect": asp,
-                                    "da": da, "mask": mask, "pred_lr": pred_lr})
-                    print(f"  [{n:2d}] n={n_est:3d} lr={lr:.2f} d={depth} l={leaves:2d} -> "
-                          f"zptae_imp={imp:+.2%} (lam={lam:.2f}, aspect={asp:+.2f}, DA={da:.4f})")
+    for family in FAMILIES:
+        for lr in LEARNING_RATES:
+            for depth in MAX_DEPTHS:
+                for leaves in NUM_LEAVES:
+                    fold_models = []
+                    for train_idx, test_idx in tscv.split(X):
+                        if family == "clf":
+                            m = LGBMClassifier(n_estimators=N_ESTIMATORS_MAX, learning_rate=lr,
+                                               max_depth=depth, num_leaves=leaves, **FIXED_COMMON)
+                            m.fit(X.iloc[train_idx], y_sign[train_idx],
+                                  sample_weight=weights[train_idx])
+                        else:
+                            m = LGBMRegressor(n_estimators=N_ESTIMATORS_MAX, learning_rate=lr,
+                                              max_depth=depth, num_leaves=leaves,
+                                              **FIXED_COMMON, **REG_EXTRA)
+                            m.fit(X.iloc[train_idx], y_train_space[train_idx],
+                                  sample_weight=weights[train_idx])
+                        fold_models.append((m, test_idx))
+                    for n_est in N_ESTIMATORS_CHECKPOINTS:
+                        n += 1
+                        pred = np.full(len(X), np.nan)
+                        for m, test_idx in fold_models:
+                            if family == "clf":
+                                p_up = m.predict_proba(X.iloc[test_idx], num_iteration=n_est)[:, 1]
+                                pred[test_idx] = 2.0 * p_up - 1.0   # conviction in [-1, 1]
+                            else:
+                                pred[test_idx] = m.predict(X.iloc[test_idx], num_iteration=n_est)
+                        mask = np.isfinite(pred)
+                        # back to log-return units before any scoring: the classifier's
+                        # conviction is always vol-scaled, the regressor only if it was
+                        # trained in z-space
+                        scale = sigma100[mask] if (family == "clf" or VOL_NORM_TARGET) else 1.0
+                        pred_lr = pred[mask] * scale
+                        lam, imp, asp = tune_shrink(y_raw[mask], pred_lr)
+                        da = float(np.mean(np.sign(pred_lr) == np.sign(y_raw[mask])))
+                        results.append({"family": family, "n_estimators": n_est,
+                                        "learning_rate": lr, "max_depth": depth,
+                                        "num_leaves": leaves, "lambda": lam,
+                                        "zptae_imp": imp, "aspect": asp,
+                                        "da": da, "mask": mask, "pred_lr": pred_lr})
+                        print(f"  [{family} {n:2d}] n={n_est:3d} lr={lr:.2f} d={depth} l={leaves:2d} -> "
+                              f"zptae_imp={imp:+.2%} (lam={lam:.2f}, aspect={asp:+.2f}, DA={da:.4f})")
 
     results.sort(key=lambda r: (r["zptae_imp"], r["da"]), reverse=True)
+    for family in FAMILIES:
+        fam_best = next(r for r in results if r["family"] == family)
+        print(f"  best {family}: zptae_imp={fam_best['zptae_imp']:+.2%} DA={fam_best['da']:.4f} "
+              f"aspect={fam_best['aspect']:+.2f}")
     best = results[0]
     lam = best["lambda"]
-    print(f"\n[4/5] Best: n={best['n_estimators']} lr={best['learning_rate']} "
-          f"d={best['max_depth']} l={best['num_leaves']} lambda={lam:.2f}")
+    print(f"\n[4/5] Best: family={best['family']} n={best['n_estimators']} "
+          f"lr={best['learning_rate']} d={best['max_depth']} l={best['num_leaves']} lambda={lam:.2f}")
     print("  NOTE: lambda and config were chosen on the same OOS folds — expect the live")
     print("  numbers to be a bit weaker. The full 7-metric report on calibrated preds:")
     y_oos = y_raw[best["mask"]]
+    # re-run calibration verbosely once, so any score-vs-whitelist tradeoff is shown
+    tune_shrink(y_oos, best["pred_lr"], verbose=True)
     p_oos = lam * best["pred_lr"]
     report = evaluator.evaluate(y_true=pd.Series(y_oos), y_pred=pd.Series(p_oos))
     evaluator.print_report(report, detailed=False)
@@ -313,11 +353,15 @@ def main() -> None:
     print(f"  log-aspect ratio: {aspect_ratio(y_oos, p_oos):+.3f} (whitelist: within ±{ASPECT_BOUND})")
 
     print("[5/5] Training production model on all data and exporting ...")
-    final_model = LGBMRegressor(
-        n_estimators=best["n_estimators"], learning_rate=best["learning_rate"],
-        max_depth=best["max_depth"], num_leaves=best["num_leaves"], **FIXED_LGBM,
-    )
-    final_model.fit(X, y_train_space, sample_weight=weights)
+    hp = dict(n_estimators=best["n_estimators"], learning_rate=best["learning_rate"],
+              max_depth=best["max_depth"], num_leaves=best["num_leaves"])
+    family = best["family"]
+    if family == "clf":
+        final_model = LGBMClassifier(**hp, **FIXED_COMMON)
+        final_model.fit(X, y_sign, sample_weight=weights)
+    else:
+        final_model = LGBMRegressor(**hp, **FIXED_COMMON, **REG_EXTRA)
+        final_model.fit(X, y_train_space, sample_weight=weights)
 
     ticker = tickers[0]
     vol_norm = VOL_NORM_TARGET
@@ -333,8 +377,12 @@ def main() -> None:
             live_row["open_time"] = pd.Timestamp.now(tz="UTC")
         Cl, Hl, Ll, Vl, wl = matrices_from_workflow_df(live_row, n_bars)
         X_live, sigma_live = compact_features(Cl, Hl, Ll, Vl, wl)
-        raw = float(final_model.predict(X_live[feature_cols])[0])
-        log_ret = lam * raw * (float(sigma_live[0]) if vol_norm else 1.0)
+        if family == "clf":
+            p_up = float(final_model.predict_proba(X_live[feature_cols])[0, 1])
+            log_ret = lam * (2.0 * p_up - 1.0) * float(sigma_live[0])
+        else:
+            raw = float(final_model.predict(X_live[feature_cols])[0])
+            log_ret = lam * raw * (float(sigma_live[0]) if vol_norm else 1.0)
         if abs(log_ret) > 0.2:
             print(f"warning: implausible 1h log-return {log_ret:+.4f}")
         print(f"1h BTC log-return prediction: {log_ret:+.6f}")
