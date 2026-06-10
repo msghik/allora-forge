@@ -10,6 +10,11 @@ A BTC/USD price-prediction worker for **Allora Topic 69** (open 1-day forecast o
    versions everything, and serves inferences to an Allora worker node. See
    **[docs/MLOPS.md](docs/MLOPS.md)**.
 
+> **Entering the "1h BTC/USD Log-Return" Forge competition?** See
+> **[docs/FORGE_1H_WORKER.md](docs/FORGE_1H_WORKER.md)** — a step-by-step
+> walkthrough (topic discovery → training → deploying with your registered
+> Forge wallet) using the helper scripts in [`scripts/`](scripts/).
+
 ## Production: self-updating worker (full stack)
 
 ```bash
