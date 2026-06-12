@@ -42,6 +42,7 @@ DATA_SOURCE (allora|binance), PREDICT_PKL.
 from __future__ import annotations
 
 import os
+import pickle
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -427,8 +428,14 @@ def main() -> None:
     # Drop the live connection the smoke test created — it must not (and often
     # cannot) cross the pickle boundary; the worker rebuilds it on first call.
     _live["wf"] = None
-    with open(OUT_PKL, "wb") as f:
+    # Atomic, verified export: a crash mid-dump must never leave a truncated
+    # predict.pkl behind (a 0-byte artifact crashes the worker with EOFError).
+    tmp_path = OUT_PKL + ".tmp"
+    with open(tmp_path, "wb") as f:
         cloudpickle.dump(predict, f)
+    with open(tmp_path, "rb") as f:
+        pickle.load(f)          # reload check before promoting
+    os.replace(tmp_path, OUT_PKL)
     print(f"\nSaved {OUT_PKL} (family={family}, live data via '{ds_name}').")
     print("Deploy with your registered Forge wallet:")
     print("  TOPIC_ID=<id from scripts/find_topic_id.py> python scripts/deploy_my_worker.py")

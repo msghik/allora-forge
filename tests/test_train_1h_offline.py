@@ -78,6 +78,8 @@ t.N_ESTIMATORS_MAX = 100
 
 t.main()
 
+assert not os.path.exists("/tmp/test_predict.pkl.tmp"), "atomic export left a .tmp behind"
+assert os.path.getsize("/tmp/test_predict.pkl") > 1024, "exported artifact suspiciously small"
 predict = pickle.load(open("/tmp/test_predict.pkl", "rb"))
 val = predict(12345)
 assert np.isfinite(val), "predict.pkl returned non-finite"

@@ -49,6 +49,26 @@ def derive_address(mnemonic: str) -> str:
     return str(LocalWallet.from_mnemonic(mnemonic, "allo").address())
 
 
+def validate_artifact(path: Path) -> None:
+    """Refuse to deploy an artifact that can't possibly run.
+
+    A training run that crashes mid-export can leave a truncated/empty
+    predict.pkl behind; deploying it crashes the worker at startup with
+    'EOFError: Ran out of input'. Catch that here instead.
+    """
+    size = path.stat().st_size
+    if size < 1024:
+        sys.exit(f"{path} is only {size} bytes — almost certainly a truncated export "
+                 "from a crashed training run. Re-run scripts/train_1h_model.py first.")
+    import pickle
+    try:
+        with open(path, "rb") as f:
+            pickle.load(f)
+    except Exception as e:
+        sys.exit(f"{path} failed to load ({type(e).__name__}: {e}).\n"
+                 "Re-run scripts/train_1h_model.py to regenerate it.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--topic", type=int, default=int(os.environ.get("TOPIC_ID", "0")),
@@ -64,6 +84,7 @@ def main() -> int:
                  "TOPIC_ID=<id> python scripts/deploy_my_worker.py")
     if not Path(args.artifact).exists():
         sys.exit(f"{args.artifact} not found — run scripts/train_1h_model.py first")
+    validate_artifact(Path(args.artifact))
 
     # Worker runtime reads the API key from env or .allora_api_key in cwd.
     if not os.environ.get("ALLORA_API_KEY") and not Path(".allora_api_key").exists():
