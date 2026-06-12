@@ -179,6 +179,20 @@ for each epoch's submission window and replies with `predict(nonce)`.
 
 ## 6. Verify and monitor
 
+One command triages everything (process, log, balance, whitelist,
+registration, submissions) and prints a verdict:
+
+```bash
+python scripts/check_worker.py --topic <TOPIC_ID>
+```
+
+Right after deploying, `worker_registered=false` is normal — the SDK sends
+the registration tx at startup/first window and it needs gas, so give it a
+few epochs. If it stays false, the script's verdict tells you why (empty
+wallet, whitelist gate, dead process, or an error in the log).
+
+The raw checks, if you prefer curl:
+
 ```bash
 # registered on the topic?
 curl https://allora-api.testnet.allora.network/emissions/v9/worker_registered/<TOPIC_ID>/allo1uv65ppemwjlz0grevxz3u7hxjjg6jpqh7cz5lt
