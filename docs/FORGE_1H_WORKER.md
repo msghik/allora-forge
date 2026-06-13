@@ -209,6 +209,21 @@ Within a few epochs you should appear on the competition leaderboard
 (Hammers accrue per scored epoch). Scores for an epoch are revealed after
 the 1h ground truth matures.
 
+### If submissions fail with "signature verification failed"
+
+The SDK submits each nonce from two paths (polling + websocket) that race and
+corrupt each other's bundle signature. Run the worker **single-path** instead
+of (not in addition to) the WorkerManager worker:
+
+```bash
+TOPIC_ID=72 python scripts/run_worker.py     # websocket-only; stops the WM worker first
+```
+
+Keep it under tmux/systemd. It reuses the wallet key `deploy_my_worker.py`
+already imported and skips the faucet (you're funded). Confirm with
+`python scripts/check_worker.py --topic 72` — you want `latest_inference`
+advancing and the error lines gone.
+
 ## 7. Keep it alive and improving
 
 - The worker must run 24/7 — a small VPS is plenty. `WorkerManager.start_all()`
@@ -246,6 +261,6 @@ the retrain/gate automation.
 | Trained on `binance` unintentionally | The trainer falls back to Binance when `ALLORA_API_KEY` isn't in the environment — check the "Data source:" line at startup. Either source works, but be consistent between runs you compare; the artifact records which source it uses for live data (printed at export). |
 | Submissions revert / out of gas | Balance ran dry — hit the faucet again. |
 | Worker log shows `EOFError: Ran out of input` | The deployed `predict.pkl` is empty/truncated (a training run crashed mid-export). Re-run the trainer and redeploy — both scripts now guard against this (atomic verified export; deploy refuses unloadable artifacts). |
-| Submissions fail with `failed to validate worker data bundle: signature verification failed: unauthorized` (gas is still consumed) | **Not** a wallet/registration/timing problem — the chain checks the bundle signature *before* registration (a single clean submission would pass). It's the SDK submitting the **same nonce twice** (it runs a polling loop *and* a websocket subscription); the two bundle-signings race and corrupt each other, so both land on-chain and fail validation. Tell-tale: failing nonces show two `👉 Found new nonce` / two predictions, while a nonce handled by one path succeeds. Fixes, in order: (1) `pip install -U allora-sdk` — this dual-path dedupe is the SDK's job and newer versions are the real fix; (2) introspect your installed SDK for a single-path/dedupe option — `python -c "import inspect,allora_sdk.worker as w; print(inspect.signature(w.AlloraWorker.__init__)); print(inspect.signature(w.AlloraWorker.run))"` — and pass it through `worker_runtime`; (3) the current trainer memoizes the prediction per nonce and caches live data (`LIVE_CACHE_TTL`, default 90s), cutting inference from ~25s to instant so the race window nearly closes and late submissions stop. Retrain + redeploy to pick up (3). |
+| Submissions fail with `failed to validate worker data bundle: signature verification failed: unauthorized` (gas is still consumed) | **Not** a wallet/registration/timing problem — the chain checks the bundle signature *before* registration (a single clean submission passes). It's the SDK submitting the **same nonce twice** (it runs a polling loop *and* a websocket subscription, both still present after `pip install -U allora-sdk`); the two bundle-signings race and corrupt each other, so both land on-chain and fail. Tell-tale: failing nonces show two `👉 Found new nonce` / two predictions; a nonce handled by one path succeeds. **Fix: run the worker single-path** with `scripts/run_worker.py` (sets `polling_interval` huge → websocket-only, the path that produced the one success). It stops the WorkerManager worker first so you don't run both. The trainer's per-nonce memo + data cache (`LIVE_CACHE_TTL`) additionally shrink the window. |
 | Faucet says "IP added to blocklist" | The faucet blocks datacenter/VPS IPs and IPs with repeated requests (the SDK auto-drip retries can trip it). The block is on the requesting IP, not your wallet: request from your phone (mobile data) or home browser instead — tokens go to the address no matter where the request comes from. Fallback: ask in the Allora Discord. |
 | Scores are terrible despite good backtest | Check you're submitting a **log-return**, not a price; check the topic ID; remember 1h log-returns are tiny (±0.002 typical) so a price-scale output destroys your ZPTAE. |
