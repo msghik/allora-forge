@@ -36,6 +36,8 @@ def make_window_df(n_rows, seed_offset=0):
 
 DF = make_window_df(N_ROWS)
 
+LIVE_FETCHES = {"n": 0}
+
 class FakeWorkflow:
     def __init__(self, **kw):
         # Real data managers hold locks/threads (Binance websocket client).
@@ -46,6 +48,7 @@ class FakeWorkflow:
     def get_full_feature_target_dataframe(self, start_date=None):
         return DF.set_index("open_time")
     def get_live_features(self, ticker):
+        LIVE_FETCHES["n"] += 1   # count fetches to prove the per-nonce memo
         return make_window_df(1, seed_offset=42).drop(columns=["target"]).set_index("open_time")
 
 class FakeEvaluator:
@@ -81,7 +84,16 @@ t.main()
 assert not os.path.exists("/tmp/test_predict.pkl.tmp"), "atomic export left a .tmp behind"
 assert os.path.getsize("/tmp/test_predict.pkl") > 1024, "exported artifact suspiciously small"
 predict = pickle.load(open("/tmp/test_predict.pkl", "rb"))
-val = predict(12345)
-assert np.isfinite(val), "predict.pkl returned non-finite"
-print(f"\nreloaded predict.pkl -> {val:+.6f}")
+
+# Per-nonce memo: the duplicate (polling + websocket) call for one nonce must
+# reuse the cached value, not trigger a second ~25s live fetch. This is what
+# collapses the duplicate-submission race window.
+LIVE_FETCHES["n"] = 0
+v1 = predict(777)
+v2 = predict(777)            # same nonce -> served from memo, no extra fetch
+assert v1 == v2, "same nonce returned different values"
+assert LIVE_FETCHES["n"] == 1, f"duplicate nonce re-fetched live data ({LIVE_FETCHES['n']} fetches)"
+v3 = predict(778)            # new nonce -> recompute (data TTL may still cache bars)
+assert np.isfinite(v3), "new-nonce prediction non-finite"
+print(f"\nper-nonce memo OK: nonce777={v1:+.6f} (1 fetch), nonce778={v3:+.6f}")
 print("END-TO-END OFFLINE TEST PASS")

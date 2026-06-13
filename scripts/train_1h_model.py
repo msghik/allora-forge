@@ -369,13 +369,17 @@ def main() -> None:
     n_bars = INPUT_BARS
     ds_name = data_source
     ds_tickers = list(tickers)
+    live_ttl = float(os.environ.get("LIVE_CACHE_TTL", "90"))
 
     # The live workflow is rebuilt lazily inside predict: data managers hold
     # threads/locks (e.g. the Binance websocket client) that cannot be
     # pickled, and a fresh worker process needs its own live connection
     # anyway. Only plain config crosses the pickle boundary; the API key is
     # re-read from the runtime environment, never embedded in the artifact.
+    # _cache is a plain dict (picklable, and cleared before export) — NOT a
+    # threading.Lock, which is what broke the export in the first place.
     _live: dict = {"wf": None}
+    _cache: dict = {}
 
     def _live_workflow():
         if _live["wf"] is None:
@@ -400,13 +404,34 @@ def main() -> None:
         return _live["wf"]
 
     def predict(nonce: int | None = None) -> float:
-        """Return the predicted 1h BTC/USD **log-return** (not a price)."""
-        live_row = _live_workflow().get_live_features(ticker=ticker)
-        if live_row is None or len(live_row) == 0:
-            raise ValueError("could not fetch live features")
-        live_row = live_row.reset_index()
-        if "open_time" not in live_row.columns:   # fall back to "now" for time feats
-            live_row["open_time"] = pd.Timestamp.now(tz="UTC")
+        """Return the predicted 1h BTC/USD **log-return** (not a price).
+
+        The SDK polls AND subscribes via websocket, so it can call predict
+        twice for the same nonce. We memoize the value per nonce: the second
+        call returns the identical number instantly instead of re-running a
+        ~25s live fetch. This collapses the duplicate-submission race window
+        (the root cause of the 'signature verification failed' rejections)
+        and avoids late submissions. A short TTL cache of the fetched bars
+        keeps consecutive epochs cheap too. (The duplicate *transaction* is
+        still the SDK's to suppress — see docs; upgrade allora-sdk.)
+        """
+        import time as _t
+        now = _t.time()
+        # Per-nonce memo: same submission round -> same prediction, instantly.
+        if nonce is not None and _cache.get("nonce") == nonce and "value" in _cache:
+            return _cache["value"]
+
+        live_row = _cache.get("data")
+        if live_row is None or (now - _cache.get("data_ts", 0.0)) > live_ttl:
+            live_row = _live_workflow().get_live_features(ticker=ticker)
+            if live_row is None or len(live_row) == 0:
+                raise ValueError("could not fetch live features")
+            live_row = live_row.reset_index()
+            if "open_time" not in live_row.columns:   # fall back to "now" for time feats
+                live_row["open_time"] = pd.Timestamp.now(tz="UTC")
+            _cache["data"] = live_row
+            _cache["data_ts"] = now
+
         Cl, Hl, Ll, Vl, wl = matrices_from_workflow_df(live_row, n_bars)
         X_live, sigma_live = compact_features(Cl, Hl, Ll, Vl, wl)
         if family == "clf":
@@ -417,17 +442,22 @@ def main() -> None:
             log_ret = lam * raw * (float(sigma_live[0]) if vol_norm else 1.0)
         if abs(log_ret) > 0.2:
             print(f"warning: implausible 1h log-return {log_ret:+.4f}")
-        print(f"1h BTC log-return prediction: {log_ret:+.6f}")
-        return float(log_ret)
+        log_ret = float(log_ret)
+        _cache["nonce"] = nonce
+        _cache["value"] = log_ret
+        print(f"1h BTC log-return prediction (nonce={nonce}): {log_ret:+.6f}")
+        return log_ret
 
     print("  smoke-testing predict() against live data ...")
     test_val = predict()
     if not np.isfinite(test_val):
         sys.exit("predict() returned a non-finite value; not exporting")
 
-    # Drop the live connection the smoke test created — it must not (and often
-    # cannot) cross the pickle boundary; the worker rebuilds it on first call.
+    # Drop everything the smoke test created — the live connection (often
+    # unpicklable) and the warm cache (a stale DataFrame the worker shouldn't
+    # ship with). The worker rebuilds both on first call.
     _live["wf"] = None
+    _cache.clear()
     # Atomic, verified export: a crash mid-dump must never leave a truncated
     # predict.pkl behind (a 0-byte artifact crashes the worker with EOFError).
     tmp_path = OUT_PKL + ".tmp"
